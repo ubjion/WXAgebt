@@ -1,4 +1,4 @@
-# WeChatAgent 0.4.0
+# WXAgebt
 
 > 本仓库为基于 [sourcepro5/WeChatAgent](https://github.com/sourcepro5/WeChatAgent) 的修改副本，源版本为 `v0.4.0`（提交 [`34766b6`](https://github.com/sourcepro5/WeChatAgent/commit/34766b6)）。原项目版权和许可声明保留，来源与本副本修改说明见 [SOURCES.md](SOURCES.md)。
 

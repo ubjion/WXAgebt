@@ -8,6 +8,41 @@ import crypto from 'node:crypto';
 import {imageBlocks,offloadCompletedImages,offloadCompletedSessionImages} from '../packages/dsh-social-bridge-plugin/image-input.mjs';
 import {normalizeOneBotEvent} from '../components/qq-bridge/src/onebot/normalize.js';
 
+test('unsupported vision has an actionable reply instead of an unexplained missing image',async()=>{
+  const failures=[];
+  const ctx={get:name=>name==='llm'?{resolveModelInfo:async()=>({inputModalities:['text']})}:{saveImage:async()=>assert.fail('unsupported image must not be saved')}};
+  const blocks=await imageBlocks(ctx,'unused','wechat:private:123',[{id:'a'.repeat(64)}],'fixture','fixture',{onUnavailable:item=>failures.push(item)});
+  assert.equal(failures[0].code,'MODEL_IMAGE_INPUT_UNSUPPORTED');
+  assert.match(blocks[0].text,/当前模型不支持图片输入/);
+  assert.match(blocks[0].text,/告知对方/);
+  assert.match(blocks[0].text,/支持图片的模型/);
+});
+
+test('missing image services or reader configuration still permit a truthful reply without leaking paths',async t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'wechat-reader-missing-'));
+  t.after(()=>{assert(path.resolve(dir).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(dir,{recursive:true,force:true});});
+  const available={llm:{resolveModelInfo:async()=>({inputModalities:['image']})},attachments:{saveImage:async()=>assert.fail('reader is unavailable')}};
+  for(const services of [{},available]){
+    const failures=[];
+    const blocks=await imageBlocks({get:name=>services[name]},dir,'wechat:private:123',[{id:'a'.repeat(64)}],'fixture','fixture',{onUnavailable:item=>failures.push(item)});
+    assert.equal(blocks[0].type,'text');assert.match(blocks[0].text,/告知对方/);
+    assert(!blocks[0].text.includes(dir));assert.equal(failures.length,1);
+  }
+});
+
+test('an unsafe reader address never receives image requests even when replying with a placeholder',async t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'wechat-reader-address-'));fs.mkdirSync(path.join(dir,'state'));
+  t.after(()=>{assert(path.resolve(dir).startsWith(path.resolve(os.tmpdir())+path.sep));fs.rmSync(dir,{recursive:true,force:true});});
+  fs.writeFileSync(path.join(dir,'state/wechat-io-config.json'),JSON.stringify({reader_base_url:'https://example.com',reader_token:'private-fixture-token'}));
+  let fetched=false;t.mock.method(globalThis,'fetch',async()=>{fetched=true;assert.fail('unsafe reader must not be contacted');});
+  const ctx={get:name=>name==='llm'?{resolveModelInfo:async()=>({inputModalities:['image']})}:{}};
+  const failures=[];
+  const blocks=await imageBlocks(ctx,dir,'wechat:private:123',[{id:'a'.repeat(64)}],'fixture','fixture',{onUnavailable:item=>failures.push(item)});
+  assert.equal(fetched,false);assert.equal(failures[0].code,'IMAGE_READER_LOOPBACK_REQUIRED');
+  assert(!blocks[0].text.includes('private-fixture-token'));
+  await assert.rejects(imageBlocks(ctx,dir,'wechat:private:123',[{id:'a'.repeat(64)}],'fixture','fixture'),/IMAGE_READER_LOOPBACK_REQUIRED/);
+});
+
 test('image references stay typed through OneBot and reject arbitrary paths',()=>{
   const event={post_type:'message',message_type:'private',user_id:123,message:[{type:'image',data:{file:'wechatagent://image/'+'a'.repeat(64),media_id:'a'.repeat(64)}}]};
   const message=normalizeOneBotEvent('wechat','wechat-onebot',event);
@@ -62,9 +97,11 @@ test('one missing or timed-out sticker keeps other images and preserves their pr
   const services={llm:{resolveModelInfo:async()=>({inputModalities:['image']})},attachments:{saveImage:async()=>({attachmentId:'sha256:fixture'})}},ctx={get:name=>services[name]};
   const blocks=await imageBlocks(ctx,dir,'wechat:private:123',ids.map(id=>({id})),'fixture','fixture',{onUnavailable:item=>failures.push(item)});
   assert.deepEqual(blocks.map(block=>block.type),['text','image']);assert.match(blocks[0].text,/I1 读取失败/);assert.equal(failures[0].code,'IMAGE_STICKER_LOCAL_COPY_UNAVAILABLE');
+  assert.match(blocks[0].text,/本地图片尚不可用/);assert.match(blocks[0].text,/告知对方/);
   hang=true;const started=Date.now();
   const timed=await imageBlocks(ctx,dir,'wechat:private:123',[{id:ids[0]}],'fixture','fixture',{timeoutMs:40,onUnavailable:item=>failures.push(item)});
   assert.equal(timed[0].type,'text');assert.equal(failures.at(-1).code,'IMAGE_PROCESS_TIMEOUT');assert(Date.now()-started<1000);
+  assert.match(timed[0].text,/图片处理超时/);assert.match(timed[0].text,/告知对方/);
 });
 
 test('two image workers preserve order and fast later images survive a slow first image',async t=>{

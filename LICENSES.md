@@ -4,6 +4,7 @@
 
 | 内容 | 来源与范围 |
 | --- | --- |
+| 本修改副本的直接源项目 | [sourcepro5/WeChatAgent](https://github.com/sourcepro5/WeChatAgent)，基于 `v0.4.0` / `34766b6`；保留根目录及各组件的原始版权和许可文本，本副本改动见 [SOURCES.md](SOURCES.md) |
 | Bridge 运行子集 | [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge)，MIT；完整通知见 [组件 LICENSE](components/qq-bridge/LICENSE)；裁剪与修改说明见该目录 README |
 | NT 数据库读取源码子集 | [zhuobichen/weflow-cli](https://github.com/zhuobichen/weflow-cli)，MIT；完整通知见 [组件 LICENSE](components/weflow-cli/LICENSE)；来源提交与修改范围见该目录 README |
 | scripts/wechat_media.py | 同一 weflow-cli 来源版本中媒体辅助函数的复用，保留文件头来源说明和对应 MIT 通知 |

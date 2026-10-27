@@ -8,23 +8,35 @@ export async function imageBlocks(ctx,root,conversationKey,images,provider,model
   if (!images.length) return [];
   if (images.some(image=>!/^[a-f0-9]{64}$/.test(image?.id ?? ''))) throw new Error('INVALID_IMAGE_REFERENCE');
   const llm=ctx.get('llm'), attachments=ctx.get('attachments');
-  if (!llm || !attachments) throw new Error('NATIVE_IMAGE_SERVICES_UNAVAILABLE');
   const signal=AbortSignal.any([AbortSignal.timeout(timeoutMs),...(parentSignal?[parentSignal]:[])]);
   const unavailableBlock=(image,index,error)=>{
     if(!onUnavailable)throw error;
     // Reject the image itself on binding/integrity/format failures too. Never
     // admit its bytes, and never leave that bad input at the head of the chat.
     const safeCode=/^(?:IMAGE_[A-Z_]+|INVALID_IMAGE_DATA|MODEL_IMAGE_INPUT_UNSUPPORTED)$/.test(error.message)?error.message:'IMAGE_READER_NOT_READY';
-    onUnavailable({id:image.id,index,code:error.imageError??(error.name==='TimeoutError'||error.name==='AbortError'?'IMAGE_PROCESS_TIMEOUT':safeCode)});
-    return {type:'text',text:`[本轮附图 I${index+1} 读取失败，未提供画面；不要猜测内容。其余成功附图仍可使用。]`};
+    const code=error.imageError??(error.name==='TimeoutError'||error.name==='AbortError'?'IMAGE_PROCESS_TIMEOUT':safeCode);
+    onUnavailable({id:image.id,index,code});
+    const reason=code==='MODEL_IMAGE_INPUT_UNSUPPORTED'
+      ? '当前模型不支持图片输入；需要切换到支持图片的模型'
+      : code==='IMAGE_PROCESS_TIMEOUT' ? '图片处理超时，可稍后重试'
+      : ['IMAGE_LOCAL_COPY_UNAVAILABLE','IMAGE_STICKER_LOCAL_COPY_UNAVAILABLE','IMAGE_LOCAL_FILE_MISSING'].includes(code)
+        ? '本地图片尚不可用，可先在微信中打开原图后重发'
+        : '本轮未能读取图片，可尝试重新发送';
+    return {type:'text',text:`[本轮附图 I${index+1} 读取失败：${reason}。未提供画面，不要猜测内容。若影响回答对方的问题，应简短告知对方原因；不要只说已收到图片。其余成功附图和随附文字仍可正常回答。图库候选读取失败无需单独通知。]`};
   };
   let info;
-  try{info=await boundedTask(s=>llm.resolveModelInfo(provider,model,s),{timeoutMs,signal});}
+  try{
+    if (!llm || !attachments) throw new Error('NATIVE_IMAGE_SERVICES_UNAVAILABLE');
+    info=await boundedTask(s=>llm.resolveModelInfo(provider,model,s),{timeoutMs,signal});
+  }
   catch(error){return images.map((image,index)=>unavailableBlock(image,index,error));}
   if (!info.inputModalities?.includes('image')) return images.map((image,index)=>unavailableBlock(image,index,new Error('MODEL_IMAGE_INPUT_UNSUPPORTED')));
-  const io=JSON.parse(fs.readFileSync(path.join(root,'state/wechat-io-config.json'),'utf8').replace(/^\uFEFF/,''));
-  const base=new URL(io.reader_base_url);
-  if (base.protocol!=='http:' || base.hostname!=='127.0.0.1' || base.username || base.password || base.pathname!=='/' || base.search || base.hash) throw new Error('IMAGE_READER_LOOPBACK_REQUIRED');
+  let io,base;
+  try {
+    io=JSON.parse(fs.readFileSync(path.join(root,'state/wechat-io-config.json'),'utf8').replace(/^\uFEFF/,''));
+    base=new URL(io.reader_base_url);
+    if (base.protocol!=='http:' || base.hostname!=='127.0.0.1' || base.username || base.password || base.pathname!=='/' || base.search || base.hash) throw new Error('IMAGE_READER_LOOPBACK_REQUIRED');
+  } catch(error) { return images.map((image,index)=>unavailableBlock(image,index,error)); }
   const blocks=new Array(images.length);let next=0;
   async function prepare(image,index) {
     try {

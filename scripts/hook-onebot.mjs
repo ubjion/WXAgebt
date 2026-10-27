@@ -420,10 +420,21 @@ export class HookOneBot {
         ? cleanAccountId(ref.senderId)===cleanAccountId(this.ownWxid)?'self':'other':'unknown';
     }
     const content=quoteReply?(quoteReply.reply||'[引用回复，正文为空]'):payload.content;
-    const segments = [{ type: 'text', data: { text: content } }];
+    // A WeChat mention label is an address, not a name/persona instruction.
+    // Keep its wake-up segment while excluding only our configured labels
+    // from model-visible text; other mentions and ordinary body text stay intact.
+    let modelContent=content,selfMention=false;
+    if(group){
+      const names=(this.project.account?.nicknames??[]).filter(name=>typeof name==='string'&&name.length)
+        .sort((a,b)=>b.length-a.length).map(name=>name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+      if(names.length)modelContent=content.replace(new RegExp('@(?:'+names.join('|')+')(?=[\\s\\u2005]|$)[ \\t\\u2005]*','g'),()=>{selfMention=true;return '';}).trim();
+      if(selfMention&&!modelContent)modelContent='[有人@你]';
+      if(selfMention&&quoteReply)quoteReply.reply=modelContent;
+    }
+    const segments = [{ type: 'text', data: { text: modelContent } }];
     if(payload.type===25769803825)segments.push({type:'file',data:{id:payload.file.id,name:payload.file.name,size:payload.file.size}});
     if ([3,47].includes(payload.type)) segments.push({type:'image',data:{file:'wechatagent://image/'+payload.image.id,media_id:payload.image.id,...(payload.type===47?{media_kind:'sticker'}:{})}});
-    if (group && this.project.account.nicknames.some(n => content.includes('@' + n + '\u2005') || content.endsWith('@' + n))) segments.unshift({ type: 'at', data: { qq: String(selfId) } });
+    if (selfMention) segments.unshift({ type: 'at', data: { qq: String(selfId) } });
     return { time: payload.timestamp || Math.floor(Date.now() / 1000), self_id: selfId, post_type: 'message',
       message_type: kind, sub_type: group ? 'normal' : 'friend', message_id: payload.rawid,
       user_id: userId, message: segments, raw_message: content,

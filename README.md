@@ -1,6 +1,12 @@
 # WeChatAgent 0.4.0
 
+> 本仓库为基于 [sourcepro5/WeChatAgent](https://github.com/sourcepro5/WeChatAgent) 的修改副本，源版本为 `v0.4.0`（提交 [`34766b6`](https://github.com/sourcepro5/WeChatAgent/commit/34766b6)）。原项目版权和许可声明保留，来源与本副本修改说明见 [SOURCES.md](SOURCES.md)。
+
 Windows 微信助手与桌面控制台。为允许的好友和群聊提供人格聊天、独立上下文、按需联网搜索、图片与表情理解、原生表情发送，也可将微信作为 DSH 的远程任务入口。
+
+图片消息可结合画面、可见文字和随附问题自动回复，沿用当前人格。需要当前 DSH 模型支持图片输入；使用条件和验证步骤见[图片识别与自动回复](docs/IMAGE_REPLIES.md)。
+
+本修改副本还修复了群聊 @ 机器人时微信昵称进入模型正文、与人格名称冲突的问题：保留唤醒信号，仅移除机器人自身的 @ 标签，保留后续问题和对其他成员的提及。
 
 ## 0.4.0 更新
 

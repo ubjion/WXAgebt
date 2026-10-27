@@ -11,7 +11,58 @@ import { contextBufferVersion } from '../packages/dsh-social-bridge-plugin/conte
 import { WebSearch } from '../components/qq-bridge/src/core/web-search.js';
 import { SEARCH_DEFAULTS } from '../packages/dsh-social-bridge-plugin/search-policy.mjs';
 import {CHAT_POLICY_NOTICE,CHAT_COHERENCE_NOTICE,CHAT_MESSAGE_LAYOUT_NOTICE,SOCIAL_PROTOCOL_NOTICE} from '../packages/dsh-social-bridge-plugin/prompt-context.mjs';
-import {buildPrivatePrompt} from '../components/qq-bridge/src/core/social-engine.js';
+import {buildPrivatePrompt,SocialEngine} from '../components/qq-bridge/src/core/social-engine.js';
+import {MessageBuffer} from '../components/qq-bridge/src/core/message-buffer.js';
+import {normalizeOneBotEvent} from '../components/qq-bridge/src/onebot/normalize.js';
+
+test('received images carry reply guidance through native admission and deliver the result back to WeChat',async t=>{
+  const f=await fixture(t),id='d'.repeat(64);
+  const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=','base64');
+  let unavailable=false;
+  const reader=http.createServer((req,res)=>{
+    assert.equal(req.headers.authorization,'Bearer fixture-reader');
+    assert.equal(req.url,'/api/v1/images/'+id);
+    res.writeHead(unavailable?503:200,{'content-type':'application/json'});
+    res.end(JSON.stringify(unavailable?{error:'IMAGE_LOCAL_COPY_UNAVAILABLE'}:{
+      imageId:id,conversationKey:key,b64:bytes.toString('base64'),mime:'image/png',
+      sha256:crypto.createHash('sha256').update(bytes).digest('hex'),
+    }));
+  });
+  await new Promise(resolve=>reader.listen(0,'127.0.0.1',resolve));
+  t.after(()=>{reader.closeAllConnections();reader.close();});
+  fs.writeFileSync(path.join(f.dir,'state/wechat-io-config.json'),JSON.stringify({
+    reader_base_url:`http://127.0.0.1:${reader.address().port}`,reader_token:'fixture-reader',
+  }));
+  const outputs=['RESPOND: 图片主体是一个测试像素。','RESPOND: 这次图片没有读到，请打开原图后重发。','RESPOND: 继续聊。'];
+  const nativeOptions={assistantMessages:[]};
+  const r=await f.start(nativeOptions);
+  const sent=[];
+  const engine=new SocialEngine({buffer:new MessageBuffer(path.join(f.dir,'messages.json')),
+    batchMs:1,privateMinIntervalMs:0,maxPerMinute:100,maxPerTenMinutes:1000,
+    roleFor:()=>persona,personaNameFor:()=>info.personaName,
+    decide:async(_key,message,metadata)=>(await r.request('/followup',{...info,...metadata,message})).text,
+    send:async(target,text)=>sent.push({target,text}),
+  });
+  t.after(()=>engine.stop());
+  for(let index=0;index<3;index++){
+    unavailable=index===1;
+    nativeOptions.assistantMessages=[[{type:'text',text:outputs[index]}]];
+    engine.receive(normalizeOneBotEvent('wechat','wechat-onebot',{
+      post_type:'message',message_type:'private',user_id:123,self_id:99,message_id:'vision-'+index,
+      message:index<2?[{type:'image',data:{file:'wechatagent://image/'+id,media_id:id}}]:[{type:'text',data:{text:'继续聊'}}],
+    }));
+    for(let attempt=0;attempt<400&&sent.length<=index;attempt++)await new Promise(resolve=>setTimeout(resolve,5));
+    assert.equal(sent.length,index+1);assert.equal(sent[index].target.conversation_id,'123');
+  }
+  assert.deepEqual(sent.map(item=>item.text),outputs.map(text=>text.replace('RESPOND: ','')));
+  assert.match(r.calls.model[0],/根据实际可见的画面和文字/);
+  const session=[...f.store.values()][0];
+  const admitted=session.snapshotEvents().filter(event=>event.type==='user/message'&&event.data.source?.socialImageIds);
+  assert.equal(admitted.length,2);
+  assert(admitted[0].data.content.some(block=>block.type==='image'));
+  assert(admitted[1].data.content.some(block=>block.type==='text'&&block.text.includes('本地图片尚不可用')));
+  assert.equal(r.calls.create.length,1);assert.equal((await r.request('/health')).pendingTurns,0);
+});
 
 test('native admission omits confirmed duplicate echoes but keeps context after compaction and uncertain sends',async t=>{
  const f=await fixture(t),r=await f.start({assistantMessages:[[{type:'text',text:'RESPOND: 上一轮实际回复'}]]});

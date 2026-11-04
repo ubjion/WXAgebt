@@ -178,9 +178,13 @@ function paintStatus() {
   $('#power-tag').className = 'status-tag ' + (s.ready ? 'ok' : s.running ? 'warn' : '');
   $('#power-tag').innerHTML = `<i class="dot ${s.ready ? 'online' : s.running ? 'warning' : ''}"></i>${s.ready ? '全部连接正常' : s.running ? '需要检查连接' : '等待启动'}`;
   $('#service-track').innerHTML = s.services.map(service => `<div class="service-node"><div class="service-node-top"><i class="dot ${service.ready ? 'online' : 'warning'}"></i><strong>${escapeHtml(service.label)}</strong><span class="port">:${service.port}</span></div><p>${escapeHtml(service.detail)}</p><span class="status-tag ${service.ready ? 'ok' : 'warn'}">${service.ready ? '已就绪' : '待连接'}</span></div>`).join('');
-  $('#metric-messages').innerHTML = `${s.stats.received + s.stats.sent}<span>条</span>`;
-  $('#metric-note').textContent = `接收 ${s.stats.received} · 发出 ${s.stats.sent} · 待处理 ${s.stats.pending}`;
-  $('#recent-list').innerHTML = s.recent.length ? s.recent.map(row => `<div class="recent-row"><span class="avatar">${escapeHtml((row.name || '聊').slice(0, 1))}</span><div class="recent-copy"><strong>${escapeHtml(row.name || row.key)}</strong><p>${escapeHtml(row.text || '附件消息')}</p></div><div class="recent-meta">${new Date(row.timestamp * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}<div class="direction">${row.outgoing ? '发出' : '接收'}</div></div></div>`).join('') : empty('还没有消息记录', '服务启动后，允许的好友和群聊消息会出现在这里。', '', 'history');
+  $('#metric-messages').innerHTML = `${s.stats.received + s.stats.sent + (s.stats.generated??0)}<span>条</span>`;
+  $('#metric-note').textContent = `接收 ${s.stats.received} · 发出 ${s.stats.sent} · 已生成未发送 ${s.stats.generated??0} · 待处理 ${s.stats.pending}${s.replyDeliveryMode==='preview'?' · 仅生成模式':''}`;
+  $('#recent-list').innerHTML = s.recent.length ? s.recent.map((row,index) => `<div class="recent-row"><button class="recent-detail" data-recent="${index}" aria-label="查看记录全文"></button><span class="avatar">${escapeHtml((row.name || '聊').slice(0, 1))}</span><div class="recent-copy"><strong>${escapeHtml(row.name || row.key)}</strong><p>${escapeHtml((row.text || '附件消息').slice(0,100))}</p></div><div class="recent-meta">${new Date(row.timestamp * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}<div class="direction">${row.generated ? '已生成 · 未发送' : row.outgoing ? '发出' : '接收'}</div></div></div>`).join('') : empty('还没有消息记录', '服务启动后，允许的好友和群聊消息会出现在这里。', '', 'history');
+  for(const button of document.querySelectorAll('[data-recent]'))button.onclick=()=>{
+    const row=s.recent[Number(button.dataset.recent)];
+    modal(row.generated?'已生成 · 未发送':'消息记录',`<p class="modal-description">${escapeHtml(row.name||row.key)} · ${escapeHtml(new Date(row.timestamp*1000).toLocaleString('zh-CN'))}</p><pre class="record-full-text">${escapeHtml(row.text||'附件消息')}</pre><div class="modal-actions"><button class="button" data-close>关闭</button></div>`);
+  };
 }
 function roleOptions(value, includeDefault = false) {
   return (includeDefault ? '<option value="">跟随默认人格</option>' : '') + state.roles.map(r => `<option value="${escapeHtml(r.name)}" ${r.name === value ? 'selected' : ''}>${escapeHtml(r.name)}</option>`).join('');
@@ -347,7 +351,9 @@ function readerConfigurationCard() {
   const draft = state.readerDraft;
   const accounts = state.readerAccounts ?? [];
   const verified = r?.verified && !readerDirty();
+  const replyMode=state.config.wechat.replyDelivery?.mode??'send';
   return `<section class="card reader-setup">${header('连接自己的微信', '打开匹配微信后，选择账号目录，程序会获取密钥并验证数据库。', '<span class="status-tag ' + (verified ? 'ok' : 'warn') + '">' + (verified ? '已验证' : '待连接') + '</span>', 'folder')}
+    <div class="field full"><label for="reply-delivery-mode">回复模式</label><select id="reply-delivery-mode"><option value="preview" ${replyMode==='preview'?'selected':''}>仅生成，不发送</option><option value="send" ${replyMode==='send'?'selected':''}>正常发送</option></select><small>切换后自动保存。仅生成只阻止发送调用，登录检测和自动获取密钥流程保持不变。生成内容在概览“最近记录”中查看。</small></div>
     <div class="reader-steps"><span>1. 打开微信</span><span>2. 查找账号目录</span><span>3. 连接并验证</span></div>
     <div class="form-grid"><div class="field full"><label for="reader-path">微信账号目录</label><div class="input-with-button"><input id="reader-path" data-reader="dbPath" value="${escapeHtml(draft.dbPath)}" placeholder="可选择 xwechat_files、账号文件夹或 db_storage"><button class="button" data-browse="folder" data-target="reader-path">${icon('folder')}选择文件夹</button></div><small>不知道目录在哪时，先点击“自动查找账号”。选择文件夹后会自动识别账号。</small></div>
     <div class="field full"><label for="reader-account">当前账号</label><select id="reader-account" data-reader="myWxid"><option value="">${accounts.length > 1 ? '找到多个账号，请选择当前登录的账号' : '等待识别账号目录'}</option>${accounts.length ? accounts.map(a => `<option value="${escapeHtml(a.dbPath)}" ${draft.dbPath === a.dbPath ? 'selected' : ''}>${escapeHtml(a.myWxid)}${a.ready ? '' : '（等待微信同步）'}</option>`).join('') : draft.myWxid ? `<option value="${escapeHtml(draft.myWxid)}" selected>${escapeHtml(draft.myWxid)}</option>` : ''}</select></div></div>
@@ -613,6 +619,12 @@ document.addEventListener('input', event => {
   if (input.dataset.transform === 'lines') value = input.value.split('\n').map(v => v.trim()).filter(Boolean);
   if (input.dataset.transform === 'seconds') value = Math.round(Number(input.value) * 1000);
   setPath(state.draft, input.dataset.path, value); updateDraftUI();
+});
+document.addEventListener('change',async event=>{
+  if(event.target.id!=='reply-delivery-mode')return;
+  const input=event.target;input.disabled=true;
+  try{const saved=await api('/api/reply-mode',{mode:input.value,revision:state.revision});state.config=saved.config;state.revision=saved.revision;state.draft.wechat.replyDelivery=structuredClone(saved.config.wechat.replyDelivery);updateDraftUI();await renderPage();await refreshStatus();toast(saved.replyDeliveryMode==='preview'?'已开启仅生成，不发送':'已开启正常发送');}
+  catch(error){input.value=state.config.wechat.replyDelivery?.mode??'send';toast(error.message);}finally{input.disabled=false;}
 });
 document.addEventListener('change', event => {
   if(event.target.dataset.wakeKey){const key=event.target.dataset.wakeKey;state.draft.wechat.chatModes??={};if(event.target.value==='inherit')delete state.draft.wechat.chatModes[key];else state.draft.wechat.chatModes[key]=event.target.value;updateDraftUI();return;}

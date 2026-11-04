@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {createReplyPreview,readReplyMode} from '../packages/dsh-social-bridge-plugin/reply-delivery.mjs';
 import path from 'node:path';
 import { PAT_TYPE, FORWARD_TYPE, QUOTE_TYPE, normalizeForwardedRecord, normalizeQuoteReply } from '../components/qq-bridge/src/core/wechat-events.js';
 import { stickerPolicy, cleanStickerLabel } from '../components/qq-bridge/src/core/sticker-policy.js';
@@ -44,7 +45,7 @@ export function adapterStartupMessage(error,{checkOnly=false,stage='configuratio
   return (checkOnly?'WeChat-Hook check failed: ':'Adapter startup failed: ')+code+' stage='+phase+(Number.isInteger(number)?' port='+number:'')+(system?' system='+system:'');
 }
 
-export function textSegments(message) {
+export function textSegments(message, maxBytes=16000) {
   if (typeof message === 'string') {
     // Raw OneBot strings may contain CQ segments. This sender only accepts text.
     if (/\[CQ:/i.test(message)) fail('TEXT_SEGMENTS_REQUIRED');
@@ -52,13 +53,14 @@ export function textSegments(message) {
   }
   if (!Array.isArray(message) || !message.length || message.some(s => s?.type !== 'text' || typeof s.data?.text !== 'string')) fail('TEXT_ONLY');
   const text = message.map(s => s.data.text).join('');
-  if (!text.trim() || Buffer.byteLength(text, 'utf8') > 16000) fail('INVALID_TEXT');
+  if (!text.trim() || Buffer.byteLength(text, 'utf8') > maxBytes) fail('INVALID_TEXT');
   return text;
 }
 
 export class HookOneBot {
   constructor({ directory = root, fetchImpl = fetch, receiptTimeoutMs, pollMs = 400 } = {}) {
     this.directory = directory;
+    this.previewDelivery=createReplyPreview(directory);
     this.fetch = fetchImpl;
     this.receiptOverride = receiptTimeoutMs;
     this.pollMs = pollMs;
@@ -104,6 +106,8 @@ export class HookOneBot {
   }
   reader(route) { return this.json(this.api.reader_base_url, route, { headers: { Authorization: 'Bearer ' + this.api.reader_token } }); }
   native(route, body, account) {
+    // 只拦截发送调用；健康检查、登录检测和密钥获取仍走原有流程。
+    if(/^\/Send/.test(route)&&readReplyMode(this.directory)==='preview')throw new AdapterError('REPLY_DELIVERY_DISABLED',{rejected:true,attempted:false});
     return this.json(this.hook.baseUrl, route, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { Authorization: 'Bearer ' + this.nativeToken, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
@@ -170,6 +174,9 @@ export class HookOneBot {
       // Rejections are definitive pre-submission failures. Legacy records do
       // not carry the original reason, so never blindly resubmit those.
       let rejectedBusy;
+      if(attempt?.rejection?.code==='REPLY_DELIVERY_DISABLED'){
+        const preview=this.previewDelivery({kind,target,text,deliveryId});if(preview)return preview;
+      }
       if(attempt?.state==='rejected'){
         if(attempt.rejection?.code==='API_HTTP_429'){rejectedBusy=attempt;attempt=null;}
         else throw new AdapterError(attempt.rejection?.code??'NATIVE_SEND_REJECTED',{rejected:true,attempted:false,delivery_id:deliveryId??operation});
@@ -178,6 +185,8 @@ export class HookOneBot {
       this.reload();
       if (!this.allowed(kind, target)) fail('CONVERSATION_NOT_ALLOWED');
       if(!attempt){
+        const preview=this.previewDelivery({kind,target,text,deliveryId,source:proactive?'proactive':'reply'});
+        if(preview)return preview;
         const currentRows=await this.messages(wxid);
         if(proactive)this.assertProactive(kind,target,currentRows,proactive,identity,wxid);
         const baseline=currentRows.map(row=>String(row.localId)).filter(id=>/^\d+$/.test(id));
@@ -192,6 +201,11 @@ export class HookOneBot {
         let accepted;
         try{accepted=await this.native('/SendTextMsg',{wxidorgid:wxid,msg:text},identity.account);}
         catch(error){
+          if(error.message==='REPLY_DELIVERY_DISABLED'){
+            reject(error.message);
+            const preview=this.previewDelivery({kind,target,text,deliveryId});if(preview)return preview;
+            throw new AdapterError(error.message,{rejected:true,attempted:false});
+          }
           if(/^API_HTTP_(400|401|403|409|429)$/.test(error.message)){
             reject(error.message);
             throw new AdapterError(error.message==='API_HTTP_429'?'SENDER_BUSY':error.message,{rejected:true,attempted:false,delivery_id:deliveryId??operation});
@@ -308,6 +322,8 @@ export class HookOneBot {
       if(attempt && (attempt.account!==identity.account || attempt.wxid!==wxid))fail('STICKER_DELIVERY_ACCOUNT_MISMATCH');
       if(receiptOnly&&(!attempt||attempt.deliveryId&&attempt.deliveryId!==deliveryId))fail('STICKER_RECEIPT_STATE_UNAVAILABLE');
       if(!attempt){
+      // 必须在清理旧回执后再检查预览，防止其他过期待确认表情绕过历史去重。
+      const preview=this.previewDelivery({kind,target,stickerId:id,deliveryId});if(preview)return preview;
       if(deadlineAt!==undefined&&Date.now()>=deadlineAt)fail('STICKER_DELIVERY_EXPIRED');
       const sticker=await this.reader('/api/v1/stickers/'+id+'?conversationKey='+encodeURIComponent(conversationKey));
       if(sticker.id!==id || sticker.conversationKey!==conversationKey || !/^[a-f0-9]{32}$/.test(sticker.fields?.md5??''))fail('STICKER_BINDING_INVALID');
@@ -321,7 +337,13 @@ export class HookOneBot {
         this.persistStickerPending();
         let accepted;
         try{accepted=await this.native('/SendStickerMsg',{wxidorgid:wxid,sticker:sticker.fields,path:sticker.path},identity.account);}
-        catch(error){if(/^API_HTTP_(400|401|403|409|429)$/.test(error.message)){this.stickerPending.delete(key);this.persistStickerPending();}throw error;}
+        catch(error){
+          if(error.message==='REPLY_DELIVERY_DISABLED'){
+            this.stickerPending.delete(key);this.persistStickerPending();
+            const preview=this.previewDelivery({kind,target,stickerId:id,deliveryId});if(preview)return preview;
+          }
+          if(/^API_HTTP_(400|401|403|409|429)$/.test(error.message)){this.stickerPending.delete(key);this.persistStickerPending();}throw error;
+        }
         if(accepted?.ret!==0){this.stickerPending.delete(key);this.persistStickerPending();fail('NATIVE_STICKER_REJECTED');}
       }
       const deadline=Date.now()+(this.receiptOverride??this.hook.receiptTimeoutMs??18000);
@@ -371,7 +393,7 @@ export class HookOneBot {
         if(Array.isArray(params.message)&&params.message.length===1&&params.message[0]?.type==='wechat_sticker'){
           data=await this.sendSticker(kind,target,String(params.message[0].data?.id??''),deliveryId,proactive,params.wechatagent_receipt_only===true,params.wechatagent_defer_receipt===true,params.wechatagent_deadline_at,params.wechatagent_abandon_delivery===true);
         }else{
-          const text=textSegments(params.message);
+          const text=textSegments(params.message,readReplyMode(this.directory)==='preview'?128*1024:16000);
           data=await this.send(kind,target,text,deliveryId,proactive);
         }
       } else if(['get_sticker_list','get_sticker_labels','save_sticker_labels'].includes(action)){

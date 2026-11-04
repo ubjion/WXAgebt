@@ -52,3 +52,7 @@ test('a pure text turn never attaches unlabeled library candidates for synchrono
   e.decide=async(_key,_prompt,metadata)=>{images=metadata.images;return 'RESPOND: 文字';};
   e.receive(message('text-only'));await until(()=>f.sent.length===1);assert.deepEqual(images,[]);
 });
+
+test('a preview sticker is removed from the media queue without recording a send',async t=>{
+ let previews=0;const f=fixture(t,{sendSticker:async()=>{previews++;return {delivered:'preview'};}}),e=f.make();e.receive(message('preview-sticker'));await until(()=>previews===1&&e.buffer.mediaReplies.size===0);assert.equal(e.buffer.recent(key).filter(row=>row.outgoing&&row.sticker_id).length,0);
+});

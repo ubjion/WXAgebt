@@ -444,7 +444,7 @@ export class SocialEngine {
           const at=Math.min(part.busyDeadline,Date.now()+Math.min(5000,retry.busyDelayMs*2**(part.busyAttempts-1)));
           this.log(`[Social] ${key} delivery_part=${index+1} state=queued reason=sender_busy retry=${part.busyAttempts} operation=${part.deliveryId.slice(0,12)}`);return wait(at);
         }
-        if(!part.stickerId&&(error.code==='NATIVE_SEND_REJECTED'||error.data?.rejected===true&&/^API_HTTP_(400|401|403|409)$/.test(error.code??''))){
+        if(!part.stickerId&&(['NATIVE_SEND_REJECTED','REPLY_DELIVERY_DISABLED'].includes(error.code)||error.data?.rejected===true&&/^API_HTTP_(400|401|403|409)$/.test(error.code??''))){
           part.state='failed';
           this.log(`[Social] ${key} delivery_part=${index+1} state=failed reason=${error.code} operation=${part.deliveryId.slice(0,12)}`);
           return finish('本机上一轮回复中的文字被发送端明确拒绝，未发送部分已取消；不能当作对方已收到，继续处理新消息。');
@@ -459,6 +459,8 @@ export class SocialEngine {
         // attempts must use the adapter's receipt-only path, never SendSticker.
         delivery={delivered:'unconfirmed'};
       }
+      // 预览已保存，结束本批处理，但不给模型留下“对方已收到”的事实。
+      if(delivery?.delivered==='preview'){part.state='cancelled';pending.deliveryNotice='上一轮回复仅在本机生成并保存，未发送到微信，不能当作对方已收到。';persist();continue;}
       const existing=this.buffer.recent(key,this.buffer.maxPerChat).some(row=>row.outgoing&&row.delivery_id===part.deliveryId);
       const confirmed=delivery?.delivered!=='unconfirmed',sentAt=Date.now();
       part.state=confirmed?'confirmed':part.stickerId?'submitted':'unconfirmed';persist();

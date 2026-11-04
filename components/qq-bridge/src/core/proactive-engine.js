@@ -133,6 +133,7 @@ export class ProactiveEngine {
       if(['PROACTIVE_NOT_ALLOWED','PROACTIVE_CONTEXT_CHANGED','CONVERSATION_NOT_ALLOWED'].includes(error.code)){this.notice(key,job.id);item.job=null;}
       this.save();this.log(`[Proactive] ${key} send_pending code=${error.code??'unknown'}`);return;
     }
+    if(delivery?.delivered==='preview'){this.buffer.setContextNotice(key,{id:job.id,text:'上一轮主动回复仅生成并保存，未发送到微信。'});item.job=null;this.save();return;}
     const at=this.now(),status=delivery?.delivered==='unconfirmed'?'unconfirmed':'confirmed';
     this.buffer.completeReply(key,{deliveryId:job.id,throughId:'proactive-'+job.id,noticeId:job.noticeId},{...job.message,sender_id:job.message.self_id,text:job.text,
       timestamp:at/1000,delivery_status:status,proactive:true});

@@ -26,6 +26,7 @@
     ]
   },
   "wechat": {
+    "replyDelivery": {"mode": "send"},
     "whitelist": {
       "groups": [],
       "private": []

@@ -64,3 +64,8 @@ test('bridge progress reaches the sender without entering cached chat history or
  engine.receive({platform:'wechat',kind:'private',conversation_id:'123',sender_id:'123',sender_wxid:'wxid_fixture',message_id:'original-request',text:'完成这个原始任务',timestamp:Date.now()/1000});for(let i=0;i<400&&buffer.unread(key).length;i++)await new Promise(resolve=>setTimeout(resolve,3));
  assert.equal(submissions,1);assert.equal(deliveries.length,2);assert(deliveries[0].text.includes('FEEDBACK_ONLY_NEVER_MODEL_CONTEXT'));assert.equal(deliveries[1].text,'已完成原始任务');assert.notEqual(deliveries[0].id,deliveries[1].id);assert(!fs.readFileSync(buffer.file,'utf8').includes('FEEDBACK_ONLY_NEVER_MODEL_CONTEXT'));assert(!JSON.stringify(requests).includes('FEEDBACK_ONLY_NEVER_MODEL_CONTEXT'));
 });
+
+test('a preview feedback receipt completes the notice without repeating it',async t=>{
+ const f=fixture(t);let calls=0;const send=async()=>{calls++;return {accepted:false,attempted:false,delivered:'preview'};};
+ assert.equal(await f.feedback.notify(job('queued'),send),true);f.advance(16000);assert.equal(await f.feedback.notify(job('completed'),send),true);f.advance(60000);await f.feedback.notify(job('completed'),send);assert.equal(calls,2);
+});

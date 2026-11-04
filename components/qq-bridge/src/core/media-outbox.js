@@ -67,6 +67,7 @@ export class MediaOutbox {
         delivery={delivered:'unconfirmed'};
       }
       if(this.stopped)return;
+      if(delivery?.delivered==='preview'){part.state='cancelled';this.finish(item,'表情候选仅在本机保存，未发送到微信。');return;}
       const confirmed=delivery?.delivered!=='unconfirmed',at=Date.now();part.state=confirmed?'confirmed':'submitted';
       if(confirmed)this.buffer.mediaReplies.delete(part.deliveryId);
       const existing=this.buffer.recent(key,this.buffer.maxPerChat).some(row=>row.outgoing&&row.delivery_id===part.deliveryId);

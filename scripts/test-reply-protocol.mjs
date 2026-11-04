@@ -79,3 +79,11 @@ test('a legacy proactive draft containing a protocol marker is cancelled on rest
  const restored=make();restored.send=async(_target,text)=>sent.push(text);await restored.tick();await restored.tick();
  assert.deepEqual(sent,[]);assert.equal(calls,1);assert.equal(restored.state.chats[key].job,null);assert(f.buffer.contextNotices.has(key));assert.equal(f.buffer.recent(key).filter(row=>row.outgoing).length,0);
 });
+
+test('proactive previews clear the scheduled job without outgoing history',async t=>{
+ const f=fixture(t);let now=Date.parse('2026-10-19T02:00:00Z'),previews=0;
+ const settings={wechat:{whitelist:{private:['123'],groups:[]},proactive:{...PROACTIVE_DEFAULTS,enabled:true,mode:'greeting',intervalMinutes:30,idleMinutes:5,jitterMinutes:0,chats:{[key]:true}}}};
+ const social=new SocialEngine({buffer:f.buffer,decide:async()=> 'SILENT',send:async()=>{throw Error('unrelated send');}});t.after(()=>social.stop());
+ const proactive=new ProactiveEngine({stateFile:path.join(f.dir,'proactive.json'),buffer:f.buffer,social,settingsFor:()=>settings,personaFor:()=>({persona:'fixture',personaName:'Fixture'}),selfIdFor:()=> '99',now:()=>now,random:()=>0,decide:async()=> 'RESPOND: 仅供查看',send:async()=>{previews++;return {delivered:'preview'};}});
+ await proactive.tick();now+=30*60000;await proactive.tick();assert.equal(previews,1);assert.equal(proactive.state.chats[key].job,null);assert.equal(f.buffer.recent(key).filter(row=>row.outgoing).length,0);
+});

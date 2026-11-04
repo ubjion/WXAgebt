@@ -83,7 +83,8 @@ export class AssistantFeedback{
       }
       entry.lastAttempt=now;entry.at=now;this.persist(ledger);
       const receipt=await send({...job,feedbackKey:pending.deliveryKey},pending.text);
-      if(receipt?.confirmed!==true)return false;
+      // 预览已持久化后也结束本次进度通知，避免持续重复生成同一条记录。
+      if(receipt?.confirmed!==true&&receipt?.delivered!=='preview')return false;
       if(critical)entry.critical=[...entry.critical,stamp].slice(-12);else{entry.count++;entry.lastAt=now;if(pending.quoteHash){const recentKey=hash(job.conversationKey);ledger.data.recent[recentKey]=[...(ledger.data.recent[recentKey]??[]),pending.quoteHash].slice(-12);}}
       delete entry.pending;if(terminal)entry.done=true;this.persist(ledger);return true;
     }finally{this.inFlight.delete(job.id);}

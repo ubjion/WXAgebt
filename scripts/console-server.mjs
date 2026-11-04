@@ -1,3 +1,5 @@
+import {replyDeliveryMode,saveReplyMode} from '../packages/dsh-social-bridge-plugin/reply-delivery.mjs';
+import {readReplyPreviews} from '../packages/dsh-social-bridge-plugin/reply-preview-store.mjs';
 import {feedbackSnapshot,saveFeedback} from '../packages/dsh-social-bridge-plugin/assistant-feedback.mjs';
 import fs from 'node:fs';
 import {createPersonaCategories} from './persona-categories.mjs';
@@ -204,15 +206,17 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       const hookReady = adapter?.hook_connected === true && adapter?.hook_account_verified === true && adapter?.version === config.hook.expectedVersion;
       const ready = readerReady && bridgeReady && hookReady && dshReady && adapter?.reader_connected === true;
       const { rows } = buffered();
+      const previews=readReplyPreviews(root).map(row=>({...row,name:rows.findLast(m=>m.key===row.key)?.conversation_name??row.key}));
+      const replyMode=replyDeliveryMode(config);
       const services = [
         { id: 'reader', label: '微信读取', ready: readerReady, detail: readerReady ? '数据库可读，消息同步正常' : readerState?.lastError ? '读取异常，请重新连接并验证' : readerFailureDetail(), port: config.ports.weflow },
-        { id: 'bridge', label: '消息桥接', ready: bridgeReady && hookReady && adapter?.reader_connected === true, detail: bridgeReady && hookReady && adapter?.reader_connected ? '收发连接正常，账号已核验' : !hookReady ? '等待匹配微信登录与发送连接' : '等待消息桥接连接', port: config.ports.adapter },
+        { id: 'bridge', label: '消息桥接', ready: bridgeReady && hookReady && adapter?.reader_connected === true, detail: bridgeReady && hookReady && adapter?.reader_connected ? replyMode==='preview'?'登录与账号已核验，仅生成不发送':'收发连接正常，账号已核验' : !hookReady ? '等待匹配微信登录与发送连接' : '等待消息桥接连接', port: config.ports.adapter },
         { id: 'dsh', label: '模型连接', ready: dshReady, detail: dshReady ? 'DSH 插件已连接' : '打开 DSH 并启用本项目插件', port: config.ports.dshPlugin },
       ];
       const running = !!readerState || !!adapter || !!value(4);
-      return { ready, running, services, lastError: safeText(adapter?.last_error ?? ''),
-        stats: { received: rows.filter(m => !m.outgoing).length, sent: rows.filter(m => m.outgoing).length, pending: rows.filter(m => !m.outgoing && !m.processed).length, chats: Object.keys(buffered().buffer.chats ?? {}).length },
-        recent: rows.sort((a, b) => b.timestamp - a.timestamp).slice(0, 6).map(m => ({ key: m.key, name: m.conversation_name, text: m.text?.slice(0, 100), outgoing: m.outgoing, timestamp: m.timestamp })),
+      return { ready, running, services, replyDeliveryMode:replyMode,lastError: safeText(adapter?.last_error ?? ''),
+        stats: { generated:previews.length,received: rows.filter(m => !m.outgoing).length, sent: rows.filter(m => m.outgoing).length, pending: rows.filter(m => !m.outgoing && !m.processed).length, chats: Object.keys(buffered().buffer.chats ?? {}).length },
+        recent: [...rows,...previews].sort((a,b)=>b.timestamp-a.timestamp).slice(0,6).map(m=>({key:m.key,name:m.name??m.conversation_name,text:m.text,generated:m.generated===true,outgoing:m.outgoing,timestamp:m.timestamp})),
         ...optionalJson(preferenceFile), activeJob: activeJob ? jobs.get(activeJob) : null, latestJob: latestJob ? jobs.get(latestJob) : null, updatedAt: Date.now() };
     })();
     return statusPromise;
@@ -523,6 +527,11 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         reply(200, { ok: true });
         setTimeout(() => { if (onQuit) onQuit(); else { server.closeAllConnections(); server.close(); } }, 100);
         return;
+      }
+      if(route==='/api/reply-mode'){
+        assertIdle();
+        try{const saved=saveReplyMode(root,body.mode,body.revision);statusTime=0;return reply(200,saved);}
+        catch(error){if(error.code==='REPLY_MODE_INVALID')throw fault('请选择仅生成或正常发送模式。');if(error.code==='REPLY_MODE_CONFLICT')throw fault('配置已变化，请刷新后重试。',409);throw error;}
       }
       if (route === '/api/config') {
         const previous = snapshot();

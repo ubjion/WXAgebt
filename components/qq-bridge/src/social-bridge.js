@@ -110,7 +110,7 @@ const assistantNoticeTimer=setInterval(async()=>{if(assistantNoticesStopped||not
     const [platform,kind,target]=notice.key.split(':');if(platform!=='wechat')continue;
     if(isSilentAssistantNotification(notice)){await plugin.assistantTask(undefined,'notification-ack',{localControl:true,id:notice.id});continue;}
     let text=notice.text;if(notice.kind==='result'){const parsed=parseSocialDecision(notice.text,{}, {maxChars:12000,allowTextParts:false});text=parsed.decision==='RESPOND'&&!hasReasoningControl(parsed.text)?parsed.text:'定时任务已结束，可发送“任务列表”查看状态或继续任务。';}
-    const receipt=await adapter.sendText({kind,target,text,deliveryId:notice.id});if(receipt?.confirmed===true)await plugin.assistantTask(undefined,'notification-ack',{localControl:true,id:notice.id});
+    const receipt=await adapter.sendText({kind,target,text,deliveryId:notice.id});if(receipt?.confirmed===true||receipt?.delivered==='preview')await plugin.assistantTask(undefined,'notification-ack',{localControl:true,id:notice.id});
   }
 }catch(error){log('[Assistant] notification_deferred code='+(error.code??'unavailable'));}finally{noticesRunning=false;}},5000);
 const proactiveTimer=setInterval(()=>void proactive.tick(),60000);void proactive.tick();

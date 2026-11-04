@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {replyDeliveryMode} from '../packages/dsh-social-bridge-plugin/reply-delivery.mjs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -25,6 +26,7 @@ const write = (file, value) => {
   fs.renameSync(`${file}.tmp`, file);
 };
 export function validateConfig(config) {
+  replyDeliveryMode(config);
   validateMemberMemory(config.wechat?.memberMemory);
   validateMemeLibrarySettings(config.wechat?.memeLibrary);
   validateConversationSettings(config.wechat);

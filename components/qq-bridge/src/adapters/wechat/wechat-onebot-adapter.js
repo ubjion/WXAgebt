@@ -68,6 +68,8 @@ export class WechatOneBotAdapter extends BaseAdapter {
       this.log(`[WeChat] text_delivery_unconfirmed operation=${String(deliveryId??'').slice(0,12)}`);
       return {accepted:false,attempted:true,delivered:'unconfirmed',deliveryId};
     }
+    // 本机预览回执不代表微信已发送，不能更新发送计数和防回环缓存。
+    if(result.data?.receipt==='local-preview'&&result.data.delivered==='preview')return {accepted:false,attempted:false,delivered:'preview'};
     // The I/O service acknowledges only after a new matching server receipt.
     if (result.data?.receipt !== 'wechat-server-id') throw new Error('WeChat send response has no verified server receipt');
     this.#prune(Date.now());
@@ -89,6 +91,7 @@ export class WechatOneBotAdapter extends BaseAdapter {
       return {accepted:false,attempted:true,delivered:'unconfirmed',deliveryId};
     }
     if(abandon&&result.data?.released===true)return result.data;
+    if(result.data?.receipt==='local-preview'&&result.data.delivered==='preview')return {accepted:false,attempted:false,delivered:'preview'};
     if(result.data?.receipt!=='wechat-server-id'||result.data?.media_type!=='wechat-sticker')throw new Error('Sticker send has no server receipt');
     this.stats.sends++;return result;
   }

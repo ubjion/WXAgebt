@@ -1,3 +1,4 @@
+import {readerSetupMessages} from './reader-setup.mjs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 
@@ -44,6 +45,9 @@ export function runConsoleCommand(spec, onOutput, { cwd, env = process.env, time
 }
 
 export function taskFailureMessage(output, code) {
+  const accountCode=output.match(/\bWECHAT_[A-Z_]+\b/)?.[0];
+  if(accountCode&&readerSetupMessages[accountCode])return readerSetupMessages[accountCode];
+  if(/HOOK_DISABLED|READER_KEY_CAPTURE_DISABLED/.test(output))return '此版本整体禁用 Hook，仅使用已有密钥在本机生成内容。';
   if (/DSH_NOT_CONFIGURED/.test(output)) return '请先在“首次配置”点击“下载安装 DSH”，安装后选择 DSH 程序位置并保存设置。';
   if (/DSH_PLUGIN_NOT_READY/.test(output)) return 'DSH 插件尚未就绪，请在 DSH 添加并启用本机插件，再从托盘完整退出并重新打开 DSH。';
   const port=/\bport=(\d{1,5})\b/.exec(output)?.[1],portLabel=port?'端口 '+port:'配置端口';
@@ -51,7 +55,7 @@ export function taskFailureMessage(output, code) {
   if (/ADAPTER_PORT_DENIED|SERVICE_PORT_DENIED/.test(output)) return 'Windows 拒绝绑定'+portLabel+'，可能涉及系统保留端口或访问限制。请在连接设置中更换该端口再重试；没有监听进程也可能无法使用。';
   if (/SERVICE_PORT_INSPECTION_FAILED/.test(output)) return '无法核对'+portLabel+'的进程归属，启动已停止。请完整退出并重新打开应用，仍失败时查看启动日志。';
   if (/ADAPTER_IDENTITY_MISMATCH/.test(output)) return portLabel+'未返回本实例的适配器身份，可能仍在运行旧版服务。请先重启本实例服务；持续冲突时检查占用进程。';
-  if (/READER_NOT_LISTENING|READER_HEALTH_TIMEOUT|READER_CONNECTION_RESET|READER_HEALTH_INVALID_RESPONSE|READER_HEALTH_FAILED/.test(output)) return '适配器无法连接微信读取服务（'+portLabel+'）。请查看 reader.stderr.log 中的状态，并停止后重新启动助手服务；这一步尚未确认微信发送组件异常。';
+  if (/READER_NOT_LISTENING|READER_HEALTH_TIMEOUT|READER_CONNECTION_RESET|READER_HEALTH_INVALID_RESPONSE|READER_HEALTH_FAILED/.test(output)) return '适配器无法连接微信读取服务（'+portLabel+'）。请查看 reader.stderr.log 中的状态，并停止后重新启动助手服务；请确认所选账号与已有密钥有效。';
   if (/HOOK_CONNECTION_RESET|HOOK_HEALTH_FAILED/.test(output)) return '微信发送组件连接被中断或检查失败（'+portLabel+'）。请查看 hook-init.log；持续失败时使用“修复微信连接”。';
   if (/ADAPTER_LISTEN_FAILED|ADAPTER_START_FAILED/.test(output)) return '应用适配器未能启动。下方日志已保留失败阶段和系统错误码，请结合 adapter.stderr.log 检查。';
   if (/SERVICE_START_TIMEOUT/.test(output)) return portLabel+'对应的本实例服务未在期限内准备完成。请查看该服务日志，或重启本实例后重试。';
@@ -66,8 +70,8 @@ export function taskFailureMessage(output, code) {
   if (code === 124) return '操作等待超时。请查看连接检查与日志，确认当前服务状态后重试。';
   if (/ModuleNotFoundError|ImportError|DLL load failed|需要 sqlcipher3/i.test(output)) return '读取组件缺失或无法加载。请重新安装更新后的安装包，然后在首次配置中点击“验证内置环境”。';
   if (/Selected account database directory is unavailable/i.test(output)) return '找不到所选账号的数据库目录。请在首次配置中自动查找账号，或重新选择包含 db_storage 的账号文件夹。';
-  if (/Selected account database credential verification failed/i.test(output)) return '密钥与当前账号数据库不匹配。请在首次配置中点击“一键连接并验证”重新获取。';
-  if (/Windows current-user credential decryption failed|Legacy secret requires/i.test(output)) return '已有凭据无法在当前电脑或 Windows 用户下读取。请在首次配置中点击“一键连接并验证”重新获取。';
+  if (/Selected account database credential verification failed/i.test(output)) return '密钥与当前账号数据库不匹配。请在首次配置中点击“一键连接并验证”验证已有密钥。';
+  if (/Windows current-user credential decryption failed|Legacy secret requires/i.test(output)) return '已有凭据无法在当前电脑或 Windows 用户下读取。请在首次配置中点击“一键连接并验证”验证已有密钥。';
   if (/Contact database could not be read|One or more message shards could not be read/i.test(output)) return '微信数据库尚未完整同步或暂时无法读取。请在微信打开几个聊天，等待同步后重新连接并验证。';
   if (/Reader initialization failed: (?:KeyError|FileNotFoundError)/i.test(output)) return '数据库读取设置尚未完成。请在首次配置中选择账号并点击“一键连接并验证”。';
   if (/reader exited/i.test(output)) return '数据库读取器未能启动。请在首次配置中重新连接并验证微信；下方会显示读取器的具体错误。';

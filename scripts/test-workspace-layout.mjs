@@ -41,3 +41,9 @@ test('settings and network sections render only their own controls while drafts 
 test('sticker collection, sources and sending retain separate original settings scopes',async()=>{
  const f=fixture(),before=JSON.stringify(f.state.draft);f.state.stickerSection='sources';const sources=await f.ui.stickersPage();assert.match(sources,/data-extension-details="dsh-meme"/);assert.match(sources,/MEDIA/);f.state.stickerSection='library';assert.match(await f.ui.stickersPage(),/STICKERS/);assert.equal(JSON.stringify(f.state.draft),before);
 });
+
+test('database only diagnostics retain reading and process inspection without Hook actions',async()=>{
+ const f=fixture();f.state.settingsSection='diagnostics';const html=await f.ui.settingsPage();
+ assert.doesNotMatch(html,/hook-check|data-repair-wechat|检查后台发送|发送组件/);
+ assert.match(html,/data-action="reader-check"/);assert.match(html,/data-action="prepare"/);assert.match(html,/data-process-recovery/);
+});

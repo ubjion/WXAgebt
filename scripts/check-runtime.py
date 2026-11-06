@@ -22,8 +22,7 @@ for name in ('wechat_media', 'wechat_forwarded', 'wechat_quote', 'wechat_sticker
 spec = importlib.util.spec_from_file_location('reader_runtime_probe', root / 'scripts' / 'reader-api.py')
 reader = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(reader)
-if not (root / 'components/weflow-cli/resources/key/win32/x64/wx_key.dll').is_file():
-    raise RuntimeError('Reader key component missing')
+# 仅使用用户已有密钥读取数据库，运行时不要求抓取密钥的原生组件。
 # This must run in a fresh child, rather than inheriting the reader's sys.path.
 probe = subprocess.run([sys.executable, '-B', str(root / 'scripts/resolve-wechat-image.py'), '--check-runtime'],
     capture_output=True, text=True, encoding='utf-8', timeout=20,

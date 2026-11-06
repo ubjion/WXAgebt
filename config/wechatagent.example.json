@@ -4,15 +4,7 @@
     "python": "python",
     "dshDesktop": "",
     "weflowMode": "nt",
-    "sender": "wechat-hook"
-  },
-  "hook": {
-    "baseUrl": "http://127.0.0.1:30001",
-    "expectedVersion": "4.1.10.27",
-    "wechatExecutable": "state/hook/wechat-4.1.10.27/Weixin.exe",
-    "requestTimeoutMs": 5000,
-    "receiptTimeoutMs": 18000,
-    "maxConcurrentSends": 4
+    "sender": "database-only"
   },
   "ports": {
     "weflow": 5031,
@@ -26,7 +18,9 @@
     ]
   },
   "wechat": {
-    "replyDelivery": {"mode": "send"},
+    "replyDelivery": {
+      "mode": "preview"
+    },
     "whitelist": {
       "groups": [],
       "private": []

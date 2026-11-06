@@ -1,4 +1,4 @@
-"""Private first-run discovery, credential verification and Windows key capture."""
+"""Private first-run discovery and verification using existing database keys only."""
 import contextlib
 import ctypes
 from ctypes import wintypes
@@ -204,58 +204,8 @@ def wechat_pids(executable):
 
 
 def capture_key(executable, account, timeout=180, clock=time.monotonic, sleep=time.sleep, pids=wechat_pids, library=None):
-    dll = ROOT / 'components' / 'weflow-cli' / 'resources' / 'key' / 'win32' / 'x64' / 'wx_key.dll'
-    if library is None:
-        try:
-            library = ctypes.CDLL(str(dll))
-            library.InitializeHook.argtypes = [wintypes.DWORD]; library.InitializeHook.restype = ctypes.c_bool
-            library.PollKeyData.argtypes = [ctypes.c_void_p, ctypes.c_int]; library.PollKeyData.restype = ctypes.c_bool
-            library.CleanupHook.argtypes = []; library.CleanupHook.restype = ctypes.c_bool
-            library.GetStatusMessage.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-            library.GetStatusMessage.restype = ctypes.c_bool
-            library.GetLastErrorMsg.argtypes = []; library.GetLastErrorMsg.restype = ctypes.c_char_p
-        except (OSError, AttributeError):
-            raise SetupError('READER_KEY_COMPONENT_MISSING') from None
-    deadline = clock() + timeout
-    attached = None; observed_process = False; seen = set(); buffer = ctypes.create_string_buffer(128)
-    progress('正在连接匹配微信。请在微信中完成登录；已登录时可退出账号后重新登录，程序会等待。')
-    try:
-        while clock() < deadline:
-            processes = pids(executable)
-            if len(processes) > 1:
-                raise SetupError('WECHAT_MULTIPLE_PROCESSES')
-            pid = processes[0] if processes else None
-            if attached and pid != attached:
-                library.CleanupHook(); attached = None
-            if not pid:
-                if not observed_process:
-                    raise SetupError('WECHAT_NOT_RUNNING')
-                sleep(0.5); continue
-            if attached is None:
-                if not library.InitializeHook(pid):
-                    error = library.GetLastErrorMsg() or b''
-                    raise SetupError('READER_KEY_ACCESS_DENIED' if b'ACCESS_DENIED' in error or b'0xC0000022' in error else 'READER_SETUP_FAILED')
-                attached = pid
-                observed_process = True
-            if library.PollKeyData(buffer, len(buffer)):
-                key = buffer.value.decode('ascii', errors='ignore')
-                if re.fullmatch(r'[0-9a-fA-F]{64}', key) and key not in seen:
-                    seen.add(key)
-                    try:
-                        verify_database(account, key)
-                        return key
-                    except SetupError as error:
-                        if str(error) != 'READER_KEY_INVALID':
-                            raise
-                        progress('检测到的密钥与所选账号不匹配。请登录该目录对应的微信账号，或等待本次结束后重新选择账号。')
-            for _ in range(8):
-                status = ctypes.create_string_buffer(512); level = ctypes.c_int()
-                if not library.GetStatusMessage(status, len(status), ctypes.byref(level)):
-                    break
-            sleep(0.12)
-    finally:
-        library.CleanupHook()
-    raise SetupError('READER_SETUP_TIMEOUT')
+    # 保留历史入口兼容调用方，但在加载原生库、检查进程或访问密钥之前拒绝。
+    raise SetupError('READER_KEY_CAPTURE_DISABLED')
 
 
 def connect(request):
@@ -266,20 +216,12 @@ def connect(request):
     account = selected[0]
     if not account['ready']:
         raise SetupError('READER_DATABASE_MISSING')
-    key = ''
-    try:
-        key = credential(request.get('decryptKey', ''))
-        if key:
-            progress('正在验证当前账号的已有密钥与数据库…')
-            verify_database(account['dbPath'], key)
-    except SetupError as error:
-        if not request.get('autoKey') or str(error) not in ('READER_SECRET_UNAVAILABLE', 'READER_KEY_INVALID'):
-            raise
-        key = ''
+    # autoKey 为历史兼容字段，任何值均不得触发抓取或原生 DLL 加载。
+    key = credential(request.get('decryptKey', ''))
     if not key:
-        if not request.get('autoKey'):
-            raise SetupError('READER_KEY_REQUIRED')
-        key = capture_key(request['wechatExecutable'], account['dbPath'])
+        raise SetupError('READER_KEY_REQUIRED')
+    progress('正在验证当前账号的已有密钥与数据库…')
+    verify_database(account['dbPath'], key)
     progress('数据库验证通过，正在安全保存读取凭据…')
     return {'type': 'result', 'ok': True, **account, 'protectedKey': credential(key, protect=True)}
 

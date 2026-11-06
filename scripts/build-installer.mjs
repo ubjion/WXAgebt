@@ -7,9 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { buildIcons, embedExecutableIcon } from './build-icons.mjs';
 import { singleDirectoryTemplate } from './installer-directory-page.mjs';
 import { projectRoot as root } from './project-config.mjs';
-import { verifyHookBuild } from './hook-build-policy.mjs';
-
-verifyHookBuild(path.join(root, 'state/hook/native'));
+// 数据库读取模式的发行包不携带注入组件或独立匹配微信。
 
 const version = JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version;
 const stage = path.join(root, 'state', 'installer-stage');
@@ -58,7 +56,7 @@ add('scripts/wechat_sticker_manager.py');
 add('docs/STICKER_MANAGER.md');
 add('docs/EXIT_SHUTDOWN.md');
 add('docs/DATA_STORAGE.md');
-add('docs/HOOK_STARTUP_RECOVERY.md');
+add('docs/NO_HOOK.md');
 add('docs/PORT_STARTUP_RECOVERY.md');
 add('docs/REPLY_PROTOCOL.md');
 add('docs/PROMPT_POLICY.md');
@@ -72,12 +70,10 @@ add('scripts/persona-categories.mjs');
 add('docs/PERSONA_CATEGORIES.md');
 add('scripts/hook-client-health.ps1');
 add('scripts/stop-legacy-services.ps1');
-const scriptNames = ['wechat_files.py','file-delivery-worker.mjs','project-config.mjs','extension-status.mjs','bundled-extensions.mjs','update-check.mjs','migrate-io-config.mjs','manage.ps1','console-server.mjs','console-process.mjs','console-powershell.ps1','console-native.ps1','sync-weflow.cjs','hook-onebot.mjs','reader-api.py','reader-requirements.txt','wechat_media.py','wechat_sticker.py','wechat_sticker_send.py','wechat_forwarded.py','resolve-wechat-image.py','list-friend-ids.mjs','manage-dsh-sessions.mjs','launch-hook-wechat.ps1','pin-hook-client.ps1','launch-dsh.ps1','check-runtime.ps1','setup.ps1','build-hook.ps1'];
+const scriptNames = ['wechat-session-probe.py','wechat-session-probe.mjs','launch-wechat.ps1','plain-wechat-client.mjs','wechat_files.py','file-delivery-worker.mjs','project-config.mjs','extension-status.mjs','bundled-extensions.mjs','update-check.mjs','migrate-io-config.mjs','manage.ps1','console-server.mjs','console-process.mjs','console-powershell.ps1','console-native.ps1','sync-weflow.cjs','hook-onebot.mjs','reader-api.py','reader-requirements.txt','wechat_media.py','wechat_sticker.py','wechat_sticker_send.py','wechat_forwarded.py','resolve-wechat-image.py','list-friend-ids.mjs','manage-dsh-sessions.mjs','launch-hook-wechat.ps1','pin-hook-client.ps1','launch-dsh.ps1','check-runtime.ps1','setup.ps1','build-hook.ps1'];
 for (const name of [...scriptNames, 'wechat_group_bindings.py', 'dsh-configuration.mjs', 'process-recovery.mjs', 'process-recovery.ps1', 'check-runtime.py', 'wechat_meme_library.py', 'wechat_sticker_labels.py', 'wechat_image_normalize.py', 'wechat_sticker_collection.py', 'wechat_quote.py', 'text-delivery-store.mjs', 'reader-setup.mjs', 'reader_setup.py', 'reader-account-state.mjs','wechat-account-check.mjs']) add('scripts/' + name);
-addTree('scripts/native-hook');
 for (const name of ['nt_decrypt.py','nt_common.py']) add('components/weflow-cli/scripts/' + name);
 add('components/weflow-cli/LICENSE');
-add('components/weflow-cli/resources/key/win32/x64/wx_key.dll');
 for (const directory of ['core','onebot','adapters/wechat','dsh']) addTree('components/qq-bridge/src/' + directory, name => !name.includes('.test.'));
 for (const name of ['social-bridge.js','role-card.js','adapters/base-adapter.js']) add('components/qq-bridge/src/' + name);
 add('components/qq-bridge/LICENSE');
@@ -88,18 +84,10 @@ fs.writeFileSync(path.join(project, 'components/qq-bridge/package.json'), JSON.s
 const bridgeFile = path.join(project, 'components/qq-bridge/src/social-bridge.js');
 fs.writeFileSync(bridgeFile, fs.readFileSync(bridgeFile, 'utf8').replace('这是蓝色大肥鱼的 AI 接入测试。', '这是微信助手的 AI 接入测试。'));
 addTree('packages/dsh-social-bridge-plugin', (name, dir) => name !== '.git' && name !== '.bin' && (dir || /\.(mjs|js|json|yml|yaml|md|txt|ts|map)$/.test(name) || /^LICENSE|^NOTICE/.test(name)));
-addTree('components/WeChat-Hook', (name, dir) => !['.git','x64','Debug','Release','防止微信自动更新','运行库'].includes(name) && (dir || !/\.(exe|dll|pdb|zip|7z|log)$/i.test(name)));
-const provenance = {};
-for (const file of files.filter(name => name.startsWith('components/WeChat-Hook/'))) provenance[file.slice('components/WeChat-Hook/'.length)] = sha(fs.readFileSync(path.join(project, file)));
-fs.writeFileSync(path.join(project, 'components/WeChat-Hook/UPSTREAM.json'), JSON.stringify({ commit:'e905d07ade50d2c6472e4eb3bd4f3fe19cf662c6', files:provenance }, null, 2)); files.push('components/WeChat-Hook/UPSTREAM.json');
 fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ name:'wechatagent-runtime', version, type:'module', private:true }, null, 2)); files.push('package.json');
 
 copyFile(process.execPath, path.join(stage, 'runtime/node.exe'));
 if (!fs.existsSync(path.join(stage, 'runtime/python/python.exe'))) throw new Error('Run prepare-installer-runtime.mjs first.');
-const clientSource = path.join(root, 'state/hook/wechat-4.1.10.27');
-copyFile(path.join(clientSource, 'Weixin.exe'), path.join(vendor, 'wechat/Weixin.exe'));
-copyTree(path.join(clientSource, '4.1.10.27'), path.join(vendor, 'wechat/4.1.10.27'), name => !/\.disabled$|\.log$|\.token$/.test(name));
-for (const name of ['version.dll','build.json']) copyFile(path.join(root, 'state/hook/native', name), path.join(vendor, 'hook', name));
 const pluginTemplate = path.join(project, 'packages/dsh-social-bridge-plugin/cordis.patch.yml');
 fs.writeFileSync(pluginTemplate, fs.readFileSync(pluginTemplate, 'utf8')
   .replace(/file:\/\/\/[^"'\r\n]*\/dsh-social-bridge-plugin\/([A-Za-z0-9_-]+\.mjs)(?:\?[^"'\r\n]*)?/g, 'dsh-social-bridge-plugin/$1'));
@@ -107,7 +95,7 @@ const fileList = [...new Set(files)].sort();
 const sourceHashes = Object.fromEntries(fileList.map(file => [file, sha(fs.readFileSync(path.join(project,file)))]));
 const desktopHashes = Object.fromEntries(fs.readdirSync(appDir).filter(file=>fs.statSync(path.join(appDir,file)).isFile()).sort().map(file=>[file,sha(fs.readFileSync(path.join(appDir,file)))]));
 const runtimeRevision = sha(Buffer.from(JSON.stringify({node:sha(fs.readFileSync(process.execPath)),python:fs.readFileSync(path.join(stage,'runtime/python/DEPENDENCIES.json'),'utf8')}))).slice(0,12);
-const buildId = sha(Buffer.from(JSON.stringify({sourceHashes,desktopHashes,runtimeRevision,hook:sha(fs.readFileSync(path.join(vendor,'hook/version.dll')))}))).slice(0,16);
+const buildId = sha(Buffer.from(JSON.stringify({sourceHashes,desktopHashes,runtimeRevision}))).slice(0,16);
 fs.writeFileSync(path.join(project, 'deployment.json'), JSON.stringify({ version, buildId, builtAt:new Date().toISOString(), runtimeRevision, sourceHashes, files:fileList, presets:presetNames.map(name=>name.slice(0,-3)), node:process.version, python:'3.13.16', dshBundled:false,dshSdkVersion:DSH_SDK_VERSION,dshInstallUrl:DSH_INSTALL_URL, privateAccountDataIncluded:false, authorization:'Maintainer confirmed redistribution authorization for all currently used components and requested all current role files as bundled presets on 2026-10-05.' }, null, 2));
 // No personal data can enter the deployment template or vendor programs.
 for (const file of fs.readdirSync(project, { recursive:true })) {
@@ -115,7 +103,7 @@ for (const file of fs.readdirSync(project, { recursive:true })) {
   if (/^state\/|(^|\/)wechatagent\.json$|social-dsh-token|native-token|\.env$|WeFlow-config\.json$/.test(relative)) throw new Error('Private file entered the release: ' + relative);
 }
 for (const file of fs.readdirSync(vendor, { recursive:true })) if (/wechatagent-hook\.token|native-token|social-messages|WeFlow-config\.json|^.*\/\.dsh\//.test(String(file).replaceAll('\\','/'))) throw new Error('Private vendor file entered the release: ' + file);
-const notices = 'WeChatAgent '+version+'\n\nRedistribution authorization for the bundled WeChat client and WeChat-Hook components was confirmed by the maintainer on 2026-10-05. This statement does not replace their respective license terms.\n\nBundled components: Electron, Node.js, Python 3.13.16, SQLCipher Python binding, cryptography, zstandard, pycryptodome, Pillow, imageio-ffmpeg, cffi, pycparser, MIT weflow-cli NT reader sources, MIT Social Bridge sources and the local DSH bridge plugin/SDK. The DSH desktop program is installed separately by the user.\n\nPython and wheel licenses are retained in runtime/python and its site-packages/*.dist-info directories. Electron/Chromium and vendor notices are retained with their programs. Refer to project/LICENSES.md for source attribution and license boundaries. No account, credential, chat or whitelist data is included. Maintainer-authorized persona files are included as presets.\n';
+const notices = 'WeChatAgent '+version+'\n\nThe WeChat client and Hook components are not bundled. Existing-key database reading is used.\n\nBundled components: Electron, Node.js, Python 3.13.16, SQLCipher Python binding, cryptography, zstandard, pycryptodome, Pillow, imageio-ffmpeg, cffi, pycparser, MIT weflow-cli NT reader sources, MIT Social Bridge sources and the local DSH bridge plugin/SDK. The DSH desktop program is installed separately by the user.\n\nPython and wheel licenses are retained in runtime/python and its site-packages/*.dist-info directories. Electron/Chromium and vendor notices are retained with their programs. Refer to project/LICENSES.md for source attribution and license boundaries. No account, credential, chat or whitelist data is included. Maintainer-authorized persona files are included as presets.\n';
 fs.writeFileSync(path.join(appDir, 'THIRD-PARTY-NOTICES.txt'), notices);
 copyFile(path.join(root, 'LICENSE'), path.join(appDir, 'LICENSE.txt'));
 const { build, Platform, Arch } = require('electron-builder');

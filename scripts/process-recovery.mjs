@@ -24,7 +24,7 @@ export function startupConflictPorts(output,allowedPorts){
 export function createProcessRecovery({root,probe=request=>helper(root,'Inspect',request),stop=request=>helper(root,'Stop',request),now=Date.now,ttlMs=120000}={}) {
   const scans=new Map(),confirmations=new Map();let busy=false;
   const prune=()=>{for(const map of [scans,confirmations])for(const [id,value] of map)if(value.expiresAt<=now())map.delete(id);};
-  const request=(config,healthyPorts,includeMatchingWeChat,matchingWeChatOnly)=>({root,ports:matchingWeChatOnly?[]:[...Object.values(config.ports),Number(new URL(config.hook.baseUrl).port||80)].filter(port=>!healthyPorts.includes(port)),wechatExecutable:path.resolve(root,config.hook.wechatExecutable),protectedPids:[process.pid],includeMatchingWeChat,matchingWeChatOnly});
+  const request=(config,healthyPorts,includeMatchingWeChat,matchingWeChatOnly)=>({root,ports:matchingWeChatOnly?[]:Object.values(config.ports).filter(port=>!healthyPorts.includes(port)),wechatExecutable:config.runtime?.wechatExecutable?path.resolve(root,config.runtime.wechatExecutable):'',protectedPids:[process.pid],includeMatchingWeChat,matchingWeChatOnly});
   return {
     async scan(config,revision,{healthyPorts=[],includeMatchingWeChat=false,matchingWeChatOnly=false}={}) {
       prune();const input=request(config,healthyPorts,includeMatchingWeChat,matchingWeChatOnly),result=await probe(input);

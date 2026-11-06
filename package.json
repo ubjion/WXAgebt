@@ -3,7 +3,7 @@
   "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Personal WeChat AI friend with NT reader, WeChat-Hook, OneBot v11 and an existing DSH Desktop",
+  "description": "Personal WeChat AI assistant with existing-key NT database reader and local generation; Hook disabled",
   "license": "SEE LICENSES.md",
   "engines": {
     "node": ">=22.13.0"
@@ -48,7 +48,9 @@
     "test": "node --test scripts/test-*.mjs",
     "test:assistant-controller": "node --test scripts/test-assistant-controller.mjs scripts/test-assistant-mode.mjs scripts/test-assistant-access.mjs scripts/test-file-transfers.mjs scripts/test-assistant-feedback.mjs",
     "test:assistant-feedback": "node --test scripts/test-assistant-feedback.mjs",
-    "test:layout": "node --test scripts/test-workspace-layout.mjs scripts/test-extension-page.mjs"
+    "test:layout": "node --test scripts/test-workspace-layout.mjs scripts/test-extension-page.mjs",
+    "wechat:open": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/launch-wechat.ps1",
+    "test:no-hook": "node --test scripts/test-no-hook-*.mjs scripts/test-plain-wechat-launcher.mjs scripts/test-reply-preview.mjs scripts/test-wechat-account-check.mjs scripts/test-adapter-startup.mjs"
   },
   "devDependencies": {
     "@electron/asar": "3.4.1",

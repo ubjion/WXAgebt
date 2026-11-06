@@ -37,19 +37,8 @@ export function validateConfig(config) {
   validateWebReaderSettings(config.wechat?.webReader);
   if (config.version !== 1) throw new Error('Unsupported WeChatAgent config version');
   if (!['nt', 'bundled', 'existing'].includes(config.runtime?.weflowMode ?? 'nt')) throw new Error('weflowMode must be nt, bundled or existing');
-  if (config.runtime?.sender !== 'wechat-hook') throw new Error('sender must be wechat-hook; the UIA sender has been removed');
-  if (config.runtime.sender === 'wechat-hook') {
-    if ((config.runtime.weflowMode ?? 'nt') !== 'nt') throw new Error('WeChat-Hook requires the NT reader for account and receipt checks');
-    const url = new URL(config.hook?.baseUrl ?? '');
-    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Hook API must be an HTTP loopback base URL');
-    if (config.hook.expectedVersion !== '4.1.10.27' || !config.hook.wechatExecutable || /[\r\n"\0]/.test(config.hook.wechatExecutable)) throw new Error('Configure the matching WeChat-Hook executable and version 4.1.10.27');
-    for (const [key, low, high] of [['requestTimeoutMs',1000,5000],['receiptTimeoutMs',1000,18000],['maxConcurrentSends',1,4]]) {
-      const value = config.hook[key];
-      if (!Number.isInteger(value) || value < low || value > high) throw new Error('Invalid Hook ' + key);
-    }
-    const port = Number(url.port || 80);
-    if (Object.values(config.ports ?? {}).includes(port)) throw new Error('Hook port must be distinct from the four project ports');
-  }
+  if (config.runtime?.sender !== 'database-only') throw new Error('HOOK_DISABLED: sender must be database-only');
+  if ((config.runtime.weflowMode ?? 'nt') !== 'nt') throw new Error('Database-only mode requires the NT reader');
   const ports = Object.values(config.ports ?? {});
   if (ports.length !== 4 || ports.some(p => !Number.isInteger(p) || p < 1024 || p > 65535) || new Set(ports).size !== 4) throw new Error('Configure four distinct service ports between 1024 and 65535');
   if (!['weflow','onebot','adapter','dshPlugin'].every(key => Number.isInteger(config.ports[key]))) throw new Error('Required ports: weflow, onebot, adapter, dshPlugin');
@@ -67,17 +56,21 @@ export function prepare(root = projectRoot) {
   const configFile = path.join(root, 'config', 'wechatagent.json');
   if (!fs.existsSync(configFile)) fs.copyFileSync(path.join(root, 'config', 'wechatagent.example.json'), configFile);
   migrateConnections(root);
-  const config = validateConfig(read(configFile));
+  const config = read(configFile);
+  // 先备份旧配置，再锁定无 Hook 模式；不变更已有账号和密钥。
+  if(config.runtime?.sender!=='database-only'||config.wechat?.replyDelivery?.mode!=='preview'||config.hook){
+    const backup=path.join(root,'state/migrations/no-hook-v1/wechatagent.json');
+    fs.mkdirSync(path.dirname(backup),{recursive:true});
+    if(!fs.existsSync(backup))fs.copyFileSync(configFile,backup);
+    config.runtime??={};config.runtime.sender='database-only';
+    config.wechat??={};config.wechat.replyDelivery={mode:'preview'};
+    delete config.hook;
+    validateConfig(config);write(configFile,config);
+  }
+  validateConfig(config);
   const migratedMeme=migrateDshSettings(root,config);if(migratedMeme!==null){validateConfig(config);write(configFile,config);}
   const state = path.join(root, 'state');
   for (const dir of ['logs', 'weflow', 'attachments']) fs.mkdirSync(path.join(state, dir), { recursive: true });
-  if (config.runtime.sender === 'wechat-hook') {
-    const hookDir = path.join(state, 'hook');
-    fs.mkdirSync(hookDir, { recursive: true });
-    const hookToken = path.join(hookDir, 'native-token.txt');
-    if (!fs.existsSync(hookToken)) fs.writeFileSync(hookToken, crypto.randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 });
-    if (!/^[a-f0-9]{64}$/.test(fs.readFileSync(hookToken, 'utf8').trim())) throw new Error('Invalid native Hook token');
-  }
   const tokenFile = path.join(state, 'social-dsh-token.txt');
   if (!fs.existsSync(tokenFile)) fs.writeFileSync(tokenFile, crypto.randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 });
   const roleTexts=new Map();

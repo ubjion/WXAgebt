@@ -1,4 +1,4 @@
-param([ValidateSet('start','stop','restart','status','prepare')][string]$Action = 'start')
+﻿param([ValidateSet('start','stop','restart','status','prepare')][string]$Action = 'start')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $stateDir = Join-Path $root 'state'
@@ -100,7 +100,7 @@ function Test-ServiceReady([string]$Name,[int]$Port,[int]$ExpectedProcessId) {
     if($Name -eq 'adapter'){
         try{$health=Invoke-RestMethod -Uri ('http://127.0.0.1:'+$Port+'/status') -TimeoutSec 1}catch{return $false}
         $healthPid=0
-        if(-not [int]::TryParse([string]$health.pid,[ref]$healthPid) -or $health.project -ne 'WeChatAgent' -or $health.component -ne 'adapter' -or $health.statusVersion -ne 1 -or $health.backend -ne 'wechat-hook' -or $healthPid -ne $ExpectedProcessId -or $health.projectRoot -isnot [string]){throw ('ADAPTER_IDENTITY_MISMATCH port='+$Port+' expectedPid='+$ExpectedProcessId)}
+        if(-not [int]::TryParse([string]$health.pid,[ref]$healthPid) -or $health.project -ne 'WeChatAgent' -or $health.component -ne 'adapter' -or $health.statusVersion -ne 1 -or $health.backend -ne 'database-only' -or $healthPid -ne $ExpectedProcessId -or $health.projectRoot -isnot [string]){throw ('ADAPTER_IDENTITY_MISMATCH port='+$Port+' expectedPid='+$ExpectedProcessId)}
         $sameRoot=$false;try{$sameRoot=[IO.Path]::GetFullPath($health.projectRoot).TrimEnd('\','/') -eq [IO.Path]::GetFullPath($root).TrimEnd('\','/')}catch{}
         if(-not $sameRoot){throw ('ADAPTER_IDENTITY_MISMATCH port='+$Port+' expectedPid='+$ExpectedProcessId)}
         return $health.ready -eq $true
@@ -139,8 +139,8 @@ function Start-ServiceProcess([string]$Name,[string]$Exe,[string]$Arguments,[str
     throw ('SERVICE_START_TIMEOUT service='+$Name+' port='+$Port+'. Finish its setup or restart this instance before retrying.')
 }
 function Show-Status($Config) {
-    $hookSender = $Config.runtime.sender -eq 'wechat-hook'
-    Write-Output 'Sender: wechat-hook (native HTTP)'
+    $databaseOnly = $Config.runtime.sender -eq 'database-only'
+    Write-Output 'Mode: database-only (local generation; Hook disabled)'
     foreach ($property in $Config.ports.PSObject.Properties) { Write-Output ($property.Name + ': ' + (Test-Port ([int]$property.Value))) }
     $wechatRunning = [bool](Get-Process Weixin,WeChat -ErrorAction SilentlyContinue)
     Write-Output ('WeChat desktop running: ' + $wechatRunning)
@@ -166,11 +166,9 @@ function Show-Status($Config) {
     if (Test-Port ([int]$Config.ports.adapter)) {
         $status = Invoke-RestMethod ('http://127.0.0.1:'+$Config.ports.adapter+'/status') -TimeoutSec 3
         Write-Output ('OneBot connected: '+$status.ob_connected); Write-Output ('Reader connected: '+$status.reader_connected)
-        if ($hookSender) {
-            Write-Output ('Hook connected: '+$status.hook_connected)
-            Write-Output ('Hook account verified: '+$status.hook_account_verified)
-            Write-Output ('Hook version: '+$status.version)
-            if ($status.last_error) { Write-Output ('Hook last error: '+$status.last_error) }
+        if ($databaseOnly) {
+            Write-Output ('Account verified: '+$status.account_verified)
+            if ($status.last_error) { Write-Output ('Account check error: '+$status.last_error) }
         }
     }
     Write-Output ('Logs: '+(Join-Path $stateDir 'logs'))
@@ -180,7 +178,7 @@ $node = (Get-Command node -ErrorAction Stop).Source
 & $node (Join-Path $PSScriptRoot 'project-config.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'Invalid project configuration.' }
 $config = Get-Content (Join-Path $root 'config\wechatagent.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-$hookSender = $config.runtime.sender -eq 'wechat-hook'
+$databaseOnly = $config.runtime.sender -eq 'database-only'
 if ($Action -eq 'prepare') { exit 0 }
 if ($Action -eq 'status') { Show-Status $config; exit 0 }
 if ($Action -eq 'restart') { Stop-Services }
@@ -211,9 +209,9 @@ try {
         $detail = (Get-Content (Join-Path $stateDir 'logs\sync.stderr.log') -Raw).Trim()
         throw ('WeFlow account/API verification failed: ' + $detail + '. Open WeFlow settings; details: state/logs/sync.stderr.log')
     }
-    if ($hookSender) {
+    if ($databaseOnly) {
         & $node (Join-Path $PSScriptRoot 'hook-onebot.mjs') --check
-        if ($LASTEXITCODE -ne 0) { throw 'WeChat-Hook is not ready. Use Open WeChat in WeChatAgent, finish login, then start again. Check the error above and state/logs/hook-init.log for native initialization details.' }
+        if ($LASTEXITCODE -ne 0) { throw 'WeChat account could not be verified without Hook. Log in to the selected account and check the error above; no key capture or sending will be attempted.' }
     }
     $env:SOCIAL_DSH_TOKEN = (Get-Content (Join-Path $stateDir 'social-dsh-token.txt') -Raw).Trim()
     $dshUrl = 'http://127.0.0.1:'+$config.ports.dshPlugin+'/health'

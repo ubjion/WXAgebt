@@ -6,7 +6,7 @@ test('a failed startup port stays inspectable even when cached status claims the
  fs.mkdirSync(path.join(root,'config'));fs.mkdirSync(path.join(root,'state'));const config=JSON.parse(fs.readFileSync(path.join(source,'config/wechatagent.example.json'),'utf8'));
  const onebot=net.createServer(socket=>socket.end());await new Promise(resolve=>onebot.listen(0,'127.0.0.1',resolve));config.ports.onebot=onebot.address().port;t.after(()=>new Promise(resolve=>onebot.close(resolve)));
  fs.writeFileSync(path.join(root,'config/wechatagent.json'),JSON.stringify(config));fs.writeFileSync(path.join(root,'state/wechat-io-config.json'),JSON.stringify({reader_token:'fixture'}));
- const probes=[],app=createConsole({root,port:0,runner:async(_spec,output)=>{output('SERVICE_PORT_IN_USE service=adapter port=8766 owners=777');return 1;},fetchImpl:async input=>{
+ const probes=[],app=createConsole({root,port:0,accountVerifier:async()=>({ready:true}),runner:async(_spec,output)=>{output('SERVICE_PORT_IN_USE service=adapter port=8766 owners=777');return 1;},fetchImpl:async input=>{
   const url=new URL(input);return new Response(JSON.stringify(url.pathname==='/status'?{ob_connected:true,reader_connected:true,hook_connected:true,hook_account_verified:true,version:'4.1.10.27'}:{lastError:''}));
  },processProbe:async input=>{probes.push(input);return{items:[]};},processStop:async()=>{throw Error('Inspection must not terminate processes');}});
  t.after(async()=>{app.server.closeAllConnections();if(app.server.listening)await new Promise(resolve=>app.server.close(resolve));assert(root.startsWith(os.tmpdir()+path.sep));fs.rmSync(root,{recursive:true,force:true});});
@@ -25,9 +25,5 @@ test('repair API scopes process termination to the configured client and require
  t.after(async()=>{app.server.closeAllConnections();if(app.server.listening)await new Promise(resolve=>app.server.close(resolve));assert(root.startsWith(os.tmpdir()+path.sep));fs.rmSync(root,{recursive:true,force:true});});
  const address=await app.start(),base=`http://127.0.0.1:${address.port}`,info=await(await fetch(base+'/api/info')).json();
  const api=async(route,body)=>{const response=await fetch(base+route,{method:body===undefined?'GET':'POST',headers:{'X-Console-Token':info.token,...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});return{status:response.status,body:await response.json()};};
- const scan=await api('/api/process-recovery?purpose=hook-repair');assert.equal(scan.status,200);assert.equal(scan.body.purpose,'hook-repair');assert.equal(scan.body.items.length,1);assert.deepEqual(probes[0].ports,[]);assert.equal(probes[0].matchingWeChatOnly,true);assert.equal(probes[0].includeMatchingWeChat,true);assert.equal(stops.length,0);
- const prepared=await api('/api/process-recovery/prepare',{scanId:scan.body.scanId,ids:[scan.body.items[0].id]});assert.equal(prepared.status,200);assert.equal(stops.length,0);
- const request={confirmation:prepared.body.confirmation};assert.equal((await api('/api/process-recovery/stop',request)).status,409);assert.equal(stops.length,0);
- assert.equal((await api('/api/process-recovery/stop',{...request,confirmed:true})).status,200);assert.equal(stops.length,1);assert.deepEqual(stops[0].items.map(i=>i.pid),[777]);
- assert.equal((await api('/api/process-recovery/stop',{...request,confirmed:true})).status,409);assert.equal(stops.length,1);
+ const scan=await api('/api/process-recovery?purpose=hook-repair');assert.equal(scan.status,400);assert.equal(scan.body.error,'HOOK_DISABLED');assert.equal(stops.length,0);assert.equal(probes.length,0);
 });

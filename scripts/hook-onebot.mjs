@@ -5,7 +5,8 @@ import { PAT_TYPE, FORWARD_TYPE, QUOTE_TYPE, normalizeForwardedRecord, normalize
 import { stickerPolicy, cleanStickerLabel } from '../components/qq-bridge/src/core/sticker-policy.js';
 import {FileDeliveryWorker} from './file-delivery-worker.mjs';
 import { TextDeliveryStore } from './text-delivery-store.mjs';
-import {hookAccountProblem} from './wechat-account-check.mjs';
+import {verifyWeChatAccount} from './wechat-account-check.mjs';
+import {readerAccountDirectory} from './reader-account-state.mjs';
 import {proactivePolicy,withinProactiveWindow,conversationSnapshot,declinedProactive} from '../components/qq-bridge/src/core/proactive-policy.js';
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -42,7 +43,7 @@ function healthError(error,prefix,stage,endpoint){
 export function adapterStartupMessage(error,{checkOnly=false,stage='configuration',port}={}){
   const code=error instanceof AdapterError&&/^[A-Z][A-Z0-9_]{0,79}$/.test(error.message)?error.message:'ADAPTER_START_FAILED';
   const details=error?.startup??{},phase=details.stage??stage,number=details.port??(phase==='adapter-port-bind'?port:undefined),system=systemErrorCode(error);
-  return (checkOnly?'WeChat-Hook check failed: ':'Adapter startup failed: ')+code+' stage='+phase+(Number.isInteger(number)?' port='+number:'')+(system?' system='+system:'');
+  return (checkOnly?'Local account check failed: ':'Adapter startup failed: ')+code+' stage='+phase+(Number.isInteger(number)?' port='+number:'')+(system?' system='+system:'');
 }
 
 export function textSegments(message, maxBytes=16000) {
@@ -58,10 +59,11 @@ export function textSegments(message, maxBytes=16000) {
 }
 
 export class HookOneBot {
-  constructor({ directory = root, fetchImpl = fetch, receiptTimeoutMs, pollMs = 400 } = {}) {
+  constructor({ directory = root, fetchImpl = fetch, accountVerifier = verifyWeChatAccount, receiptTimeoutMs, pollMs = 400 } = {}) {
     this.directory = directory;
     this.previewDelivery=createReplyPreview(directory);
     this.fetch = fetchImpl;
+    this.accountVerifier = accountVerifier;
     this.receiptOverride = receiptTimeoutMs;
     this.pollMs = pollMs;
     this.socket = null;
@@ -79,20 +81,15 @@ export class HookOneBot {
       for(const [key,attempt] of state.attempts)this.stickerPending.set(key,{...attempt,baseline:new Set(attempt.baseline)});
     }
     this.activeActions = 0;this.fileWorker=new FileDeliveryWorker(this,{log:line=>console.log(new Date().toISOString(),line)});
-    this.status = { backend: 'wechat-hook', project:'WeChatAgent',component:'adapter',statusVersion:1,pid:process.pid,projectRoot:path.resolve(directory),ready:false,ob_connected: false, reader_connected: false,
-      hook_connected: false, hook_account_verified: false, received: 0, confirmed_sends: 0,
+    this.status = { backend: 'database-only', project:'WeChatAgent',component:'adapter',statusVersion:1,pid:process.pid,projectRoot:path.resolve(directory),ready:false,ob_connected: false, reader_connected: false,
+      hook_connected: false, hook_account_verified: false, account_verified:false, received: 0, confirmed_sends: 0,
       failed_sends: 0, last_error: '', version: '' };
     this.reload();
   }
   reload() {
     this.project = read(path.join(this.directory, 'config', 'wechatagent.json'));
     this.api = read(path.join(this.directory, 'state', 'wechat-io-config.json'));
-    this.hook = this.project.hook;
-    if (this.project.runtime.sender !== 'wechat-hook' || !this.hook || this.project.runtime.weflowMode !== 'nt') fail('HOOK_NT_CONFIG_REQUIRED');
-    const url = new URL(this.hook.baseUrl);
-    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) fail('HOOK_LOOPBACK_REQUIRED');
-    this.nativeToken = fs.readFileSync(path.join(this.directory, 'state', 'hook', 'native-token.txt'), 'utf8').trim();
-    if (!/^[a-f0-9]{64}$/.test(this.nativeToken)) fail('HOOK_TOKEN_MISSING');
+    if (this.project.runtime.weflowMode !== 'nt') fail('DATABASE_NT_CONFIG_REQUIRED');
   }
   allowed(kind, target) { return this.project.wechat.whitelist[kind === 'group' ? 'groups' : 'private'].map(String).includes(String(target)); }
   async json(base, route, options = {}, timeout = 4000) {
@@ -105,40 +102,39 @@ export class HookOneBot {
     return result;
   }
   reader(route) { return this.json(this.api.reader_base_url, route, { headers: { Authorization: 'Bearer ' + this.api.reader_token } }); }
-  native(route, body, account) {
-    // 只拦截发送调用；健康检查、登录检测和密钥获取仍走原有流程。
-    if(/^\/Send/.test(route)&&readReplyMode(this.directory)==='preview')throw new AdapterError('REPLY_DELIVERY_DISABLED',{rejected:true,attempted:false});
-    return this.json(this.hook.baseUrl, route, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: { Authorization: 'Bearer ' + this.nativeToken, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-        ...(account ? { 'X-WeChatAgent-Account': account } : {}) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }, this.hook.requestTimeoutMs ?? 5000);
+  native() {
+    // 全局阻断所有原生 HTTP 调用，包括健康检测，不能由旧配置重新启用。
+    throw new AdapterError('HOOK_DISABLED',{rejected:true,attempted:false});
   }
   async checkNative() {
-    this.status.hook_connected = false; this.status.hook_account_verified = false;
+    // 保留方法名供旧调用方兼容；实现仅查询读取服务与系统文件占用证明。
+    this.status.account_verified=false;this.status.hook_connected=false;this.status.hook_account_verified=false;
     this.startupStage='reader-status';
-    const reader = await this.reader('/api/v1/reader/status').catch(error=>{throw healthError(error,'READER','reader-status',this.api.reader_base_url);});
-    if (!reader || reader.backend !== 'weflow-cli-nt' || !reader.ownWxid || !reader.accountDirectory) fail('READER_ACCOUNT_METADATA_REQUIRED');
-    this.ownWxid = reader.ownWxid;
-    this.startupStage='hook-health';
-    const native = await this.native('/WeChatAgent/health').catch(error=>{throw healthError(error,'HOOK','hook-health',this.hook.baseUrl);});
-    if(!native || typeof native!=='object')fail('HOOK_HEALTH_INVALID_RESPONSE');
-    this.status.native_sticker_send = native.nativeStickerSend===true;this.status.native_file_send=native.nativeFileSend===true;this.status.fileTransfer='durable-outbox-v1';
-    this.status.hook_connected = true; this.status.version = native.version ?? '';
-    const accountProblem=hookAccountProblem(native,reader.accountDirectory,this.hook.expectedVersion);
-    if(accountProblem)fail(accountProblem);
-    this.status.hook_account_verified = true;
-    return { account: reader.accountDirectory.toLowerCase(), selfId: onebotId(reader.ownWxid) };
+    const reader=await this.reader('/api/v1/reader/status').catch(error=>{throw healthError(error,'READER','reader-status',this.api.reader_base_url);});
+    if(!reader||reader.backend!=='weflow-cli-nt'||!reader.ownWxid||!reader.accountDirectory)fail('READER_ACCOUNT_METADATA_REQUIRED');
+    const settings=read(path.join(this.directory,'state/weflow/WeFlow-config.json'));
+    const directory=readerAccountDirectory(this.directory,settings);
+    if(!directory||path.basename(directory).toLowerCase()!==reader.accountDirectory.toLowerCase()||cleanAccountId(reader.ownWxid).toLowerCase()!==cleanAccountId(settings.myWxid).toLowerCase())fail('WECHAT_ACCOUNT_MISMATCH');
+    this.startupStage='local-account-check';
+    let identity;
+    try{identity=await this.accountVerifier({root:this.directory,config:this.project,settings,wait:false,requireReady:true});}
+    catch(error){fail(/^WECHAT_[A-Z_]+$/.test(error.code??error.message)?error.code??error.message:'WECHAT_ACCOUNT_PROBE_FAILED');}
+    if(identity?.ready!==true)fail('WECHAT_LOGIN_REQUIRED');
+    if(JSON.stringify(read(path.join(this.directory,'state/weflow/WeFlow-config.json')))!==JSON.stringify(settings))fail('WECHAT_ACCOUNT_MISMATCH');
+    const after=await this.reader('/api/v1/reader/status');
+    if(after.ownWxid!==reader.ownWxid||after.accountDirectory!==reader.accountDirectory)fail('WECHAT_ACCOUNT_MISMATCH');
+    this.ownWxid=reader.ownWxid;this.status.account_verified=true;
+    this.status.native_sticker_send=false;this.status.native_file_send=false;this.status.fileTransfer='local-preview-only';
+    return {account:reader.accountDirectory.toLowerCase(),selfId:onebotId(reader.ownWxid)};
   }
   async waitForNative({timeoutMs=35000,intervalMs=250,onWaiting=()=>{}}={}) {
-    if(!Number.isFinite(timeoutMs)||timeoutMs<1||timeoutMs>60000||!Number.isFinite(intervalMs)||intervalMs<1)fail('INVALID_HOOK_WAIT');
+    if(!Number.isFinite(timeoutMs)||timeoutMs<1||timeoutMs>60000||!Number.isFinite(intervalMs)||intervalMs<1)fail('INVALID_ACCOUNT_WAIT');
     const deadline=Date.now()+timeoutMs;let notified=false;
     for(;;){
       try{return await this.checkNative();}
       catch(error){
-        if(!(error instanceof AdapterError)||!['HOOK_NOT_LISTENING','HOOK_HEALTH_TIMEOUT','HOOK_LOGIN_REQUIRED','HOOK_INITIALIZATION_PENDING'].includes(error.message))throw error;
-        if(Date.now()>=deadline){if(error.message==='HOOK_LOGIN_REQUIRED')throw error;fail('HOOK_INITIALIZATION_TIMEOUT');}
+        if(!(error instanceof AdapterError)||!['WECHAT_NOT_RUNNING','WECHAT_LOGIN_REQUIRED'].includes(error.message))throw error;
+        if(Date.now()>=deadline){throw error;}
         if(!notified){notified=true;onWaiting(error.message);}
         await new Promise(resolve=>setTimeout(resolve,Math.min(intervalMs,Math.max(1,deadline-Date.now()))));
       }
@@ -157,87 +153,19 @@ export class HookOneBot {
     if (!Array.isArray(result.messages)) fail('INVALID_RECEIPT_RESPONSE');
     return result.messages;
   }
-  async send(kind, target, text, deliveryId, proactive) {
-    const key = `${kind}:${target}`;
-    if (this.targetsSending.has(key) || this.targetsSending.size >= (this.hook.maxConcurrentSends ?? 4)) fail('SENDER_BUSY');
-    this.targetsSending.add(key);
-    try {
-      const identity = await this.checkNative();
-      const wxid = await this.resolveTarget(kind, target);
-      const operation=this.textDeliveries.key(kind,target,deliveryId,text);
-      let attempt=this.textDeliveries.get(operation);
-      if(attempt&&(attempt.account!==identity.account||attempt.wxid!==wxid))fail('TEXT_DELIVERY_ACCOUNT_MISMATCH');
-      if(attempt&&attempt.text!==text)fail('TEXT_DELIVERY_ID_CONFLICT');
-      if(attempt?.state==='confirmed'&&(deliveryId||Date.now()-attempt.confirmedAt<60000)){
-        this.status.last_error='';return {...attempt.response,reused:true};
-      }
-      // Rejections are definitive pre-submission failures. Legacy records do
-      // not carry the original reason, so never blindly resubmit those.
-      let rejectedBusy;
-      if(attempt?.rejection?.code==='REPLY_DELIVERY_DISABLED'){
-        const preview=this.previewDelivery({kind,target,text,deliveryId});if(preview)return preview;
-      }
-      if(attempt?.state==='rejected'){
-        if(attempt.rejection?.code==='API_HTTP_429'){rejectedBusy=attempt;attempt=null;}
-        else throw new AdapterError(attempt.rejection?.code??'NATIVE_SEND_REJECTED',{rejected:true,attempted:false,delivery_id:deliveryId??operation});
-      }
-      if(attempt?.state==='confirmed')attempt=null;
-      this.reload();
-      if (!this.allowed(kind, target)) fail('CONVERSATION_NOT_ALLOWED');
-      if(!attempt){
-        const preview=this.previewDelivery({kind,target,text,deliveryId,source:proactive?'proactive':'reply'});
-        if(preview)return preview;
-        const currentRows=await this.messages(wxid);
-        if(proactive)this.assertProactive(kind,target,currentRows,proactive,identity,wxid);
-        const baseline=currentRows.map(row=>String(row.localId)).filter(id=>/^\d+$/.test(id));
-        attempt={version:1,key:operation,deliveryId:deliveryId??'',account:identity.account,wxid,text,baseline,
-          startedAt:Date.now(),state:'dispatching',...(rejectedBusy?{rejection:rejectedBusy.rejection,firstRejection:rejectedBusy.firstRejection??rejectedBusy.rejection}:{})};
-        this.textDeliveries.put(attempt); // Persist before submission; replay must never submit it twice.
-        const reject=(code,nativeRet)=>{
-          const rejection={code,at:Date.now(),...(Number.isSafeInteger(nativeRet)?{nativeRet}:{})};
-          attempt.state='rejected';attempt.rejection=rejection;attempt.firstRejection??=rejection;
-          this.textDeliveries.put(attempt);
-        };
-        let accepted;
-        try{accepted=await this.native('/SendTextMsg',{wxidorgid:wxid,msg:text},identity.account);}
-        catch(error){
-          if(error.message==='REPLY_DELIVERY_DISABLED'){
-            reject(error.message);
-            const preview=this.previewDelivery({kind,target,text,deliveryId});if(preview)return preview;
-            throw new AdapterError(error.message,{rejected:true,attempted:false});
-          }
-          if(/^API_HTTP_(400|401|403|409|429)$/.test(error.message)){
-            reject(error.message);
-            throw new AdapterError(error.message==='API_HTTP_429'?'SENDER_BUSY':error.message,{rejected:true,attempted:false,delivery_id:deliveryId??operation});
-          }
-          attempt.state='unconfirmed';this.textDeliveries.put(attempt);
-          throw new AdapterError('TEXT_DELIVERY_UNCONFIRMED',{attempted:true,delivery_id:deliveryId??operation});
-        }
-        if(accepted?.ret!==0){reject('NATIVE_SEND_REJECTED',accepted?.ret);throw new AdapterError('NATIVE_SEND_REJECTED',{rejected:true,attempted:false,delivery_id:deliveryId??operation});}
-        attempt.state='accepted';this.textDeliveries.put(attempt);
-      }
-      const deadline = Date.now() + (this.receiptOverride ?? this.hook.receiptTimeoutMs ?? 18000);
-      try{
-        do {
-          const rows=await this.messages(wxid);
-          const candidates=rows.filter(row=>row.isSend&&(row.localType===1||row.localType===undefined)&&Number.isSafeInteger(Number(row.localId))&&Number(row.localId)>0&&
-            !attempt.baseline.includes(String(row.localId))&&Number(row.createTime)>=Math.floor(attempt.startedAt/1000)-30&&
-            String(row.fullText??row.content??row.parsedContent??'').trim()===text.trim())
-            .sort((a,b)=>Number(a.createTime)-Number(b.createTime)||Number(a.localId)-Number(b.localId));
-          if(!attempt.candidateId&&candidates.length){attempt.candidateId=String(candidates[0].localId);this.textDeliveries.put(attempt);}
-          const row=candidates.find(item=>String(item.localId)===attempt.candidateId);
-          if(row&&/^\d{1,32}$/.test(String(row.serverId))&&BigInt(row.serverId)>0n){
-            attempt.state='confirmed';attempt.confirmedAt=Date.now();
-            attempt.response={message_id:Number(row.localId),receipt:'wechat-server-id',delivered:'database-confirmed'};
-            this.textDeliveries.put(attempt);this.status.confirmed_sends++;this.status.last_error='';
-            return attempt.response;
-          }
-          await sleep(this.pollMs);
-        }while(Date.now()<deadline&&!this.stopped);
-      }catch(error){if(error instanceof AdapterError&&error.message==='TEXT_DELIVERY_STATE_INVALID')throw error;}
-      attempt.state='unconfirmed';this.textDeliveries.put(attempt);
-      throw new AdapterError('TEXT_DELIVERY_UNCONFIRMED',{attempted:true,delivery_id:deliveryId??operation});
-    } finally { this.targetsSending.delete(key); }
+  async send(kind,target,text,deliveryId,proactive) {
+    this.reload();if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
+    const identity=await this.checkNative(),wxid=await this.resolveTarget(kind,target);
+    const operation=this.textDeliveries.key(kind,target,deliveryId,text),prior=this.textDeliveries.get(operation);
+    if(prior){
+      if(prior.account!==identity.account||prior.wxid!==wxid)fail('TEXT_DELIVERY_ACCOUNT_MISMATCH');
+      if(prior.text!==text)fail('TEXT_DELIVERY_ID_CONFLICT');
+      if(prior.state==='confirmed')return {...prior.response,reused:true};
+      // 历史已提交或状态不明的消息不能重新标记为“未发送”。
+      if(prior.state!=='rejected')throw new AdapterError('TEXT_DELIVERY_UNCONFIRMED',{attempted:true,delivery_id:deliveryId??operation});
+    }
+    if(proactive)this.assertProactive(kind,target,await this.messages(wxid),proactive,identity,wxid);
+    return this.previewDelivery({kind,target,text,deliveryId,source:proactive?'proactive':'reply'});
   }
   assertProactive(kind,target,currentRows,proactive,identity,wxid){
     this.reload();const conversation='wechat:'+kind+':'+target,policy=proactivePolicy(this.project.wechat,conversation);
@@ -258,7 +186,6 @@ export class HookOneBot {
     if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
     if(!stickerPolicy(this.project.wechat,'wechat:'+kind+':'+target).enabled)return {enabled:false,stickers:[]};
     await this.checkNative();
-    if(!this.status.native_sticker_send)return {enabled:false,stickers:[]};
     const key='wechat:'+kind+':'+target;
     const result=await this.reader('/api/v1/stickers?conversationKey='+encodeURIComponent(key)+(typeof query==='string'&&query.trim()?'&query='+encodeURIComponent(query.slice(0,500)):''));
     return {enabled:true,stickers:(result.stickers??[]).filter(item=>/^[a-f0-9]{64}$/.test(item?.id??'')).slice(0,20).map(item=>({id:item.id,receivedAt:item.receivedAt,...(cleanStickerLabel(item)??{})}))};
@@ -276,95 +203,23 @@ export class HookOneBot {
     fs.renameSync(temp,this.stickerStateFile);
   }
   async sendSticker(kind,target,id,deliveryId,proactive,receiptOnly=false,deferReceipt=false,deadlineAt,abandon=false){
-    if(abandon&&(!deliveryId||!receiptOnly))fail('INVALID_RECEIPT_QUERY');
-    this.reload();
-    if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
+    this.reload();if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
     if(!/^[a-f0-9]{64}$/.test(id))fail('INVALID_STICKER_REFERENCE');
-    const operation=deliveryId?this.textDeliveries.key(kind,target,deliveryId,'[STICKER:'+id+']'):null;
-    const completed=operation?this.textDeliveries.get(operation):null;
-    if(completed&&completed.text!=='[STICKER:'+id+']')fail('TEXT_DELIVERY_ID_CONFLICT');
-    if(abandon){
-      const key=`${kind}:${target}`,attempt=this.stickerPending.get(key);
-      if(this.targetsSending.has(key))fail('SENDER_BUSY');
-      if(attempt?.deliveryId===deliveryId&&attempt.id===id){
-        if(completed?.state!=='confirmed')this.textDeliveries.put({version:1,key:operation,deliveryId,account:attempt.account,wxid:attempt.wxid,text:'[STICKER:'+id+']',baseline:[],startedAt:attempt.started*1000,state:'unconfirmed'});
-        this.stickerPending.delete(key);this.persistStickerPending();
-      }
-      return {released:true};
+    const identity=await this.checkNative(),wxid=await this.resolveTarget(kind,target);
+    const prior=deliveryId?this.textDeliveries.get(this.textDeliveries.key(kind,target,deliveryId,'[STICKER:'+id+']')):null;
+    if(prior){
+      if(prior.account!==identity.account||prior.wxid!==wxid)fail('TEXT_DELIVERY_ACCOUNT_MISMATCH');
+      if(prior.text!=='[STICKER:'+id+']')fail('TEXT_DELIVERY_ID_CONFLICT');
+      if(prior.state==='confirmed')return {...prior.response,reused:true};
+      fail('STICKER_DELIVERY_UNCONFIRMED');
     }
-    if(!stickerPolicy(this.project.wechat,'wechat:'+kind+':'+target).enabled&&!this.stickerPending.has(`${kind}:${target}`)&&completed?.state!=='confirmed')fail('STICKER_SENDING_DISABLED');
-    const key=`${kind}:${target}`;
-    if(this.targetsSending.has(key)||this.targetsSending.size>=(this.hook.maxConcurrentSends??4))fail('SENDER_BUSY');
-    this.targetsSending.add(key);
-    try{
-      const identity=await this.checkNative();if(!this.status.native_sticker_send)fail('NATIVE_STICKER_UNAVAILABLE');
-      const wxid=await this.resolveTarget(kind,target),conversationKey='wechat:'+key;
-      const stale=this.stickerPending.get(key);
-      if(stale&&Date.now()-stale.started*1000>60000){
-        if(stale.deliveryId){
-          const oldKey=this.textDeliveries.key(kind,target,stale.deliveryId,'[STICKER:'+stale.id+']');
-          if(this.textDeliveries.get(oldKey)?.state!=='confirmed')this.textDeliveries.put({version:1,key:oldKey,deliveryId:stale.deliveryId,account:stale.account,wxid:stale.wxid,text:'[STICKER:'+stale.id+']',baseline:[],startedAt:stale.started*1000,state:'unconfirmed'});
-        }
-        this.stickerPending.delete(key);this.persistStickerPending();
-      }
-      if(completed?.state==='confirmed'){
-        if(completed.account!==identity.account||completed.wxid!==wxid)fail('TEXT_DELIVERY_ACCOUNT_MISMATCH');
-        if(this.stickerPending.get(key)?.id===id){this.stickerPending.delete(key);this.persistStickerPending();}
-        return {...completed.response,reused:true};
-      }
-      const keyOf=row=>JSON.stringify([row.localId,row.createTime]);
-      let attempt=this.stickerPending.get(key);
-      // A persisted uncertain operation without its receipt state is terminal:
-      // allow a new delivery ID, but never submit the old one a second time.
-      const prior=operation?this.textDeliveries.get(operation):null;
-      if(!attempt&&prior&&prior.state!=='confirmed')fail('STICKER_RECEIPT_STATE_UNAVAILABLE');
-      if(attempt && attempt.id!==id)fail('STICKER_PREVIOUS_DELIVERY_UNCONFIRMED');
-      if(attempt && (attempt.account!==identity.account || attempt.wxid!==wxid))fail('STICKER_DELIVERY_ACCOUNT_MISMATCH');
-      if(receiptOnly&&(!attempt||attempt.deliveryId&&attempt.deliveryId!==deliveryId))fail('STICKER_RECEIPT_STATE_UNAVAILABLE');
-      if(!attempt){
-      // 必须在清理旧回执后再检查预览，防止其他过期待确认表情绕过历史去重。
-      const preview=this.previewDelivery({kind,target,stickerId:id,deliveryId});if(preview)return preview;
-      if(deadlineAt!==undefined&&Date.now()>=deadlineAt)fail('STICKER_DELIVERY_EXPIRED');
-      const sticker=await this.reader('/api/v1/stickers/'+id+'?conversationKey='+encodeURIComponent(conversationKey));
-      if(sticker.id!==id || sticker.conversationKey!==conversationKey || !/^[a-f0-9]{32}$/.test(sticker.fields?.md5??''))fail('STICKER_BINDING_INVALID');
-        const currentRows=await this.messages(wxid);
-        if(proactive)this.assertProactive(kind,target,currentRows,proactive,identity,wxid);
-        attempt={id,md5:sticker.fields.md5,account:identity.account,wxid,deliveryId,baseline:new Set(currentRows.map(keyOf)),started:Math.floor(Date.now()/1000)-1};
-        this.reload();if(!this.allowed(kind,target))fail('CONVERSATION_NOT_ALLOWED');
-        if(!stickerPolicy(this.project.wechat,conversationKey).enabled)fail('STICKER_SENDING_DISABLED');
-        if(deadlineAt!==undefined&&Date.now()>=deadlineAt)fail('STICKER_DELIVERY_EXPIRED');
-        this.stickerPending.set(key,attempt);
-        this.persistStickerPending();
-        let accepted;
-        try{accepted=await this.native('/SendStickerMsg',{wxidorgid:wxid,sticker:sticker.fields,path:sticker.path},identity.account);}
-        catch(error){
-          if(error.message==='REPLY_DELIVERY_DISABLED'){
-            this.stickerPending.delete(key);this.persistStickerPending();
-            const preview=this.previewDelivery({kind,target,stickerId:id,deliveryId});if(preview)return preview;
-          }
-          if(/^API_HTTP_(400|401|403|409|429)$/.test(error.message)){this.stickerPending.delete(key);this.persistStickerPending();}throw error;
-        }
-        if(accepted?.ret!==0){this.stickerPending.delete(key);this.persistStickerPending();fail('NATIVE_STICKER_REJECTED');}
-      }
-      const deadline=Date.now()+(this.receiptOverride??this.hook.receiptTimeoutMs??18000);
-      do{
-        for(const row of await this.messages(wxid)){
-          const nativeSticker=row.localType===47 || row.localType===34359738417 || row.localType===49&&row.stickerKind==='appmsg-8';
-          if(row.isSend && nativeSticker && !attempt.baseline.has(keyOf(row)) && row.createTime>=attempt.started-29 &&
-            Number.isSafeInteger(Number(row.localId)) && Number(row.localId)>0 && /^\d+$/.test(String(row.serverId)) && BigInt(row.serverId)>0n &&
-            row.stickerMd5===attempt.md5){
-            const response={message_id:Number(row.localId),receipt:'wechat-server-id',delivered:'database-confirmed',media_type:'wechat-sticker'};
-            if(operation)this.textDeliveries.put({version:1,key:operation,deliveryId,account:identity.account,wxid,text:'[STICKER:'+id+']',
-              baseline:[],startedAt:attempt.started*1000,state:'confirmed',confirmedAt:Date.now(),response});
-            this.stickerPending.delete(key);this.persistStickerPending();this.status.confirmed_sends++;this.status.last_error='';
-            return response;
-          }
-        }
-        if(receiptOnly||deferReceipt)break;
-        await sleep(this.pollMs);
-      }while(Date.now()<deadline&&!this.stopped);
-      throw new AdapterError('STICKER_DELIVERY_UNCONFIRMED',{attempted:true,delivery_id:deliveryId??''});
-    }finally{this.targetsSending.delete(key);}
+    const pending=this.stickerPending.get(kind+':'+target);
+    if(pending?.deliveryId===deliveryId&&pending?.id===id)fail('STICKER_DELIVERY_UNCONFIRMED');
+    if(abandon||receiptOnly)fail('STICKER_RECEIPT_STATE_UNAVAILABLE');
+    if(!stickerPolicy(this.project.wechat,'wechat:'+kind+':'+target).enabled)fail('STICKER_SENDING_DISABLED');
+    if(deadlineAt!==undefined&&Date.now()>=deadlineAt)fail('STICKER_DELIVERY_EXPIRED');
+    if(proactive)this.assertProactive(kind,target,await this.messages(wxid),proactive,identity,wxid);
+    return this.previewDelivery({kind,target,stickerId:id,deliveryId});
   }
   async action(request) {
     const response = { status: 'failed', retcode: 1407, data: {}, ...(request?.echo === undefined ? {} : { echo: request.echo }) };
@@ -401,9 +256,9 @@ export class HookOneBot {
         if(!['group','private'].includes(kind)||!/^\d+$/.test(target))fail('INVALID_STICKER_TARGET');
         data=action==='get_sticker_list'?await this.stickerList(kind,target,params.query):await this.stickerLabels(kind,target,{operation:action==='get_sticker_labels'?'read':'save',...(action==='get_sticker_labels'?{ids:params.ids}:{labels:params.labels})});
       } else if (action === 'get_status') {
-        data = { online: this.status.hook_account_verified, good: this.status.hook_account_verified && this.status.reader_connected };
+        data = { online: this.status.account_verified, good: this.status.account_verified && this.status.reader_connected };
       } else if (action === 'get_version_info') {
-        data = { app_name: 'WeChatAgent-WeChat-Hook', app_version: '1', protocol_version: 'v11' };
+        data = { app_name: 'WeChatAgent-Database-Only', app_version: '1', protocol_version: 'v11' };
       } else if (action === 'get_login_info') {
         data = { user_id: (await this.checkNative()).selfId, nickname: this.project.account.nicknames[0] };
       } else if (['get_friend_list', 'get_group_list'].includes(action)) {
@@ -464,7 +319,8 @@ export class HookOneBot {
       ...({wechatagent:{senderWxid:payload.talkerId,...(group?{memberId:crypto.createHash('sha256').update('wechat-member:'+payload.talkerId).digest('hex')}:{}),...(payload.type===PAT_TYPE?{interaction:'pat'}:forwardedRecord?{forwardedRecord}:quoteReply?{quoteReply}:{})}}),
       ...(group ? { group_id: target, group_name: payload.groupName || String(target) } : {}) };
   }
-  enqueue(payload) {
+  async enqueue(payload) {
+    await this.checkNative();
     const event = this.incoming(payload);
     if (!event || !event.message_id || this.seen.has(event.message_id)) return;
     if (this.pending.length >= 200) fail('EVENT_QUEUE_FULL');
@@ -473,7 +329,7 @@ export class HookOneBot {
     this.status.received++; this.flush();
   }
   flush() {
-    while (this.socket?.readyState === WebSocket.OPEN && this.pending.length) {
+    while (this.status.account_verified && this.socket?.readyState === WebSocket.OPEN && this.pending.length) {
       const event = this.pending[0];
       // Recheck removed whitelist entries before forwarding buffered events.
       this.reload();
@@ -527,7 +383,7 @@ export class HookOneBot {
           let at;
           while ((at = buffer.indexOf('\n')) >= 0) {
             const line = buffer.slice(0, at).trimEnd(); buffer = buffer.slice(at + 1);
-            if (line.startsWith('data:')) this.enqueue(JSON.parse(line.slice(5)));
+            if (line.startsWith('data:')) await this.enqueue(JSON.parse(line.slice(5)));
           }
           if (this.stopped) break;
         }
@@ -544,7 +400,7 @@ export class HookOneBot {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(this.status));
       } else if (req.url === '/') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end('<!doctype html><meta charset="utf-8"><title>WeChatAgent</title><h1>WeChatAgent · WeChat-Hook</h1><p>OneBot v11 · 后台文字发送</p><pre id="status">加载中</pre><script>async function update(){try{document.getElementById("status").textContent=JSON.stringify(await(await fetch("/status")).json(),null,2)}catch{document.getElementById("status").textContent="状态服务未连接"}}update();setInterval(update,2000)</script>');
+        res.end('<!doctype html><meta charset="utf-8"><title>WeChatAgent</title><h1>WeChatAgent · 仅生成</h1><p>OneBot v11 · 本机生成，不发送</p><pre id="status">加载中</pre><script>async function update(){try{document.getElementById("status").textContent=JSON.stringify(await(await fetch("/status")).json(),null,2)}catch{document.getElementById("status").textContent="状态服务未连接"}}update();setInterval(update,2000)</script>');
       } else { res.writeHead(404); res.end(); }
     });
     this.startupStage='adapter-port-bind';
@@ -561,7 +417,7 @@ export class HookOneBot {
       catch (error) { this.status.last_error = error instanceof AdapterError ? error.message : 'BACKEND_UNAVAILABLE'; }
       finally { checking = false; }
     }, 5000);
-    console.log('WeChat-Hook OneBot v11 adapter ready; native account/version verified.');
+    console.log('Database-only OneBot v11 adapter ready; local account verified; Hook disabled.');
   }
   async stop() {
     this.stopped = true;this.status.ready=false; for (const controller of this.controllers) controller.abort();
@@ -577,7 +433,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   try {
     adapter = new HookOneBot();
     if (process.argv.includes('--check')) {
-      await adapter.waitForNative({onWaiting:()=>console.log('WeChat-Hook: waiting for the matching client initialization...')}); console.log('WeChat-Hook: matching version and selected account database verified.');
+      await adapter.waitForNative({onWaiting:()=>console.log('Waiting for local WeChat account database ownership...')}); console.log('Selected account database ownership verified without Hook.');
     } else {
       await adapter.start();
       for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => { await adapter.stop(); process.exit(0); });

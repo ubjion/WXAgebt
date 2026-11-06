@@ -42,14 +42,14 @@ export function createWorkspaceLayout({api,state,escapeHtml:esc,icon,header,fiel
  }
  function diagnostics(){
   const services=state.status?.services??[];
-  return `<section class="card">${header('连接诊断','先检查，再决定是否修复。','','plug')}<div class="diagnostic-status">${services.map(service=>`<span class="status-tag ${service.ready?'ok':'warn'}">${esc(service.label??service.name??service.id)}：${service.ready?'已就绪':'未就绪'}</span>`).join('')}</div><div class="tool-row"><div><h3>检查数据库读取</h3><p>核对账号、目录与读取凭据。</p></div><button class="button" data-action="reader-check">检查读取</button></div><div class="tool-row"><div><h3>检查后台发送</h3><p>核对版本、发送组件与账号。</p></div><button class="button" data-action="hook-check">检查发送</button></div><div class="tool-row"><div><h3>修复微信连接</h3><p>保留现有检查与二次确认，可能需要重新登录微信。</p></div><button class="button" data-repair-wechat>修复微信连接…</button></div><div class="tool-row"><div><h3>准备连接配置</h3><p>更改模型或端口后更新配置，再完整重开 DSH。</p></div><div class="button-row"><button class="button" data-action="prepare">准备配置</button><button class="button" id="ack-dsh">确认已重开 DSH</button></div></div><a class="text-link" href="#settings/logs">查看原始运行日志 ${icon('arrow')}</a></section>`;
+  return `<section class="card">${header('连接诊断','核对数据库读取与模型连接。','','plug')}<div class="diagnostic-status">${services.map(service=>`<span class="status-tag ${service.ready?'ok':'warn'}">${esc(service.label??service.name??service.id)}：${service.ready?'已就绪':'未就绪'}</span>`).join('')}</div><div class="tool-row"><div><h3>检查数据库读取</h3><p>核对账号、目录与读取凭据。</p></div><button class="button" data-action="reader-check">检查读取</button></div><div class="tool-row"><div><h3>准备连接配置</h3><p>更改模型或端口后更新配置，再完整重开 DSH。</p></div><div class="button-row"><button class="button" data-action="prepare">准备配置</button><button class="button" id="ack-dsh">确认已重开 DSH</button></div></div><a class="text-link" href="#settings/logs">查看原始运行日志 ${icon('arrow')}</a></section>`;
  }
  async function settingsPage(){
   const section=state.settingsSection??'chat',cards=getCards();let body;
   if(section==='chat')body=cards.participation+cards.rhythm+cards.proactive;
   else if(section==='assistant')body=cards.admins+feedbackCard();
   else if(section==='context')body=contextSettingsCard();
-  else if(section==='connections')body=connectionsPage()+`<div class="button-row"><a class="button" href="#setup">重新打开配置向导</a><a class="button" href="#settings/diagnostics">连接诊断与修复</a></div>`;
+  else if(section==='connections')body=connectionsPage()+`<div class="button-row"><a class="button" href="#setup">重新打开配置向导</a><a class="button" href="#settings/diagnostics">连接诊断</a></div>`;
   else if(section==='diagnostics'){try{state.status=await api('/api/status');}catch{}body=diagnostics()+recovery();}
   else if(section==='logs')body=await logsPage();
   else if(section==='advanced')body=`<details class="card technical-details"><summary>开发者工具</summary><p class="subtle">供已有源码与构建环境的维护者使用；安装版日常使用无需执行。</p>${toolsPage()}</details>`;

@@ -6,11 +6,12 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 function fixture(t){
  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'adapter-startup-'));
  for(const dir of ['config','state/hook'])fs.mkdirSync(path.join(directory,dir),{recursive:true});
- fs.writeFileSync(path.join(directory,'config/wechatagent.json'),JSON.stringify({runtime:{sender:'wechat-hook',weflowMode:'nt'},hook:{baseUrl:'http://127.0.0.1:30001',expectedVersion:'4.1.10.27'},ports:{adapter:0},wechat:{whitelist:{private:[],groups:[]}}}));
+ fs.writeFileSync(path.join(directory,'config/wechatagent.json'),JSON.stringify({runtime:{sender:'database-only',weflowMode:'nt'},hook:{baseUrl:'http://127.0.0.1:30001',expectedVersion:'4.1.10.27'},ports:{adapter:0},wechat:{whitelist:{private:[],groups:[]}}}));
  fs.writeFileSync(path.join(directory,'state/wechat-io-config.json'),JSON.stringify({reader_base_url:'http://127.0.0.1:5031',reader_token:'fixture'}));fs.writeFileSync(path.join(directory,'state/hook/native-token.txt'),'a'.repeat(64));
- const calls=[],adapter=new HookOneBot({directory,fetchImpl:async input=>{
+ fs.mkdirSync(path.join(directory,'state/weflow'),{recursive:true});fs.writeFileSync(path.join(directory,'state/weflow/WeFlow-config.json'),JSON.stringify({dbPath:path.join(directory,'wxid_fixture'),myWxid:'wxid_fixture'}));fs.mkdirSync(path.join(directory,'wxid_fixture/db_storage'),{recursive:true});
+ const calls=[],adapter=new HookOneBot({directory,accountVerifier:async()=>({ready:true}),fetchImpl:async input=>{
   const url=new URL(input);calls.push(url.pathname);
-  return new Response(JSON.stringify(url.pathname==='/api/v1/reader/status'?{backend:'weflow-cli-nt',ownWxid:'wxid_fixture',accountDirectory:'wxid_fixture'}:{backend:'wechat-hook',integration:'WeChatAgent-1',version:'4.1.10.27',databaseAccounts:['wxid_fixture']}));
+  return new Response(JSON.stringify(url.pathname==='/api/v1/reader/status'?{backend:'weflow-cli-nt',ownWxid:'wxid_fixture',accountDirectory:'wxid_fixture'}:{backend:'database-only',integration:'WeChatAgent-1',version:'4.1.10.27',databaseAccounts:['wxid_fixture']}));
  }});
  adapter.connectOneBot=async()=>{};adapter.receiveSse=async()=>{};
  t.after(async()=>{if(adapter.server?.listening)await adapter.stop();assert(directory.startsWith(os.tmpdir()+path.sep));fs.rmSync(directory,{recursive:true,force:true,maxRetries:5,retryDelay:50});});
@@ -50,7 +51,7 @@ test('Windows bind denial is classified separately and retains EACCES without st
 });
 
 test('reader resets and Hook failures retain their own stage and port instead of becoming a generic backend failure',async t=>{
- for(const [stage,code,expected]of [['reader','ECONNRESET','READER_CONNECTION_RESET'],['hook','ECONNRESET','HOOK_CONNECTION_RESET'],['reader','ECONNREFUSED','READER_NOT_LISTENING']]){
+ for(const [stage,code,expected]of [['reader','ECONNRESET','READER_CONNECTION_RESET'],['reader','ECONNREFUSED','READER_NOT_LISTENING']]){
   const f=fixture(t),original=f.adapter.fetch;f.adapter.fetch=(url,options)=>{if(new URL(url).pathname===(stage==='reader'?'/api/v1/reader/status':'/WeChatAgent/health'))throw new TypeError('fetch failed',{cause:{code}});return original(url,options);};
   await assert.rejects(f.adapter.start(),error=>{assert.equal(error.message,expected);const message=adapterStartupMessage(error);assert(message.includes('stage='+(stage==='reader'?'reader-status':'hook-health')));assert(message.includes('port='+(stage==='reader'?5031:30001)));assert(message.includes('system='+code));return true;});
  }
@@ -105,7 +106,7 @@ $root=$PSScriptRoot;$stateDir=$PSScriptRoot;$script:record=@{};$script:owner=777
 function Get-NetTCPConnection{param($LocalPort,$ErrorAction)@([pscustomobject]@{State='Listen';LocalAddress='::';OwningProcess=999},[pscustomobject]@{State='Listen';LocalAddress='127.0.0.1';OwningProcess=777})}
 $ipv4=@(Get-PortBindings 8766);if($ipv4.Count -ne 1 -or $ipv4[0].OwningProcess -ne 777){throw 'IPv6-only listener caused a false IPv4 conflict'}
 function Get-PortBindings{param($Port)$script:queries++;if($script:mode -eq 'race' -and $script:queries -eq 1){return};[pscustomobject]@{State='Listen';OwningProcess=$script:owner}}
-function Invoke-RestMethod{param($Uri,$TimeoutSec)if($script:mode -eq 'legacy'){return [pscustomobject]@{backend='wechat-hook'}};[pscustomobject]@{project='WeChatAgent';component='adapter';statusVersion=1;backend='wechat-hook';pid=$(if($script:mode -eq 'bad-pid'){'invalid'}else{777});projectRoot=$(if($script:mode -eq 'wrong-project'){$root+'-other'}elseif($script:mode -eq 'bad-root'){[string][char]0}else{$root});ready=$true}}
+function Invoke-RestMethod{param($Uri,$TimeoutSec)if($script:mode -eq 'legacy'){return [pscustomobject]@{backend='database-only'}};[pscustomobject]@{project='WeChatAgent';component='adapter';statusVersion=1;backend='database-only';pid=$(if($script:mode -eq 'bad-pid'){'invalid'}else{777});projectRoot=$(if($script:mode -eq 'wrong-project'){$root+'-other'}elseif($script:mode -eq 'bad-root'){[string][char]0}else{$root});ready=$true}}
 if(-not(Test-ServiceReady 'adapter' 8766 777)){throw 'owned ready service was rejected'}
 foreach($case in @('wrong-project','legacy','bad-pid','bad-root')){$script:mode=$case;$failed=$false;try{Test-ServiceReady 'adapter' 8766 777|Out-Null}catch{if($_.Exception.Message -notmatch 'ADAPTER_IDENTITY_MISMATCH'){throw};$failed=$true};if(-not $failed){throw 'foreign or legacy identity accepted'}}
 $script:mode='ready';$script:owner=999;$failed=$false;try{Test-ServiceReady 'adapter' 8766 777|Out-Null}catch{if($_.Exception.Message -notmatch 'SERVICE_PORT_OWNER_MISMATCH'){throw};$failed=$true};if(-not $failed){throw 'foreign listener accepted'}
@@ -123,7 +124,7 @@ if(-not $failed -or $script:spawned -ne 1){throw 'startup race was accepted'}
 test('supervisor starts and reuses the real owned child only after PID and HTTP identity match',{skip:process.platform!=='win32'},async t=>{
  const f=fixture(t);fs.mkdirSync(path.join(f.directory,'state/logs'),{recursive:true});
  const entry=path.join(f.directory,'owned-service.mjs'),script=path.join(f.directory,'supervisor-live.ps1');
- fs.writeFileSync(entry,"import http from 'node:http';const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({project:'WeChatAgent',component:'adapter',statusVersion:1,backend:'wechat-hook',pid:process.pid,projectRoot:process.cwd(),ready:true}));});server.listen(Number(process.argv[2]),'127.0.0.1');");
+ fs.writeFileSync(entry,"import http from 'node:http';const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({project:'WeChatAgent',component:'adapter',statusVersion:1,backend:'database-only',pid:process.pid,projectRoot:process.cwd(),ready:true}));});server.listen(Number(process.argv[2]),'127.0.0.1');");
  const temporary=net.createServer();await new Promise(resolve=>temporary.listen(0,'127.0.0.1',resolve));const port=temporary.address().port;await new Promise(resolve=>temporary.close(resolve));
  fs.writeFileSync(script,'\uFEFF'+String.raw`
 param([string]$Manage,[string]$Node,[string]$Entry,[int]$Port)

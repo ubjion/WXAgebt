@@ -42,12 +42,12 @@ const portOpen = port => new Promise(resolve => {
 });
 
 export function validateConsoleConfig(config, root) {
+  // 全量配置保存也必须遵守仅生成约束，不能借旧配置恢复发送。
+  if (config.wechat?.replyDelivery?.mode !== undefined && config.wechat.replyDelivery.mode !== 'preview') throw fault('REPLY_DELIVERY_DISABLED');
   try { validateConfig(config); } catch (error) {
     const translations = [
       [/distinct|ports|Required ports/, '端口必须为 1024–65535 的整数，且不能互相重复。'],
-      [/loopback/, '发送后端地址必须是本机回环 HTTP 地址。'],
-      [/matching|version/, '发送组件需要匹配版本 4.1.10.27 的微信程序。'],
-      [/persona/, '人格名称不能包含路径、点号前缀或无效字符。'],
+                  [/persona/, '人格名称不能包含路径、点号前缀或无效字符。'],
       [/OneBot IDs/, '聊天 ID 必须是有效的正整数。'],
       [/nicknames|Python/, '请填写 Python 程序位置与至少一个账号昵称。'],
       [/provider|model/, '请填写有效的模型提供方与模型标识。'],
@@ -57,11 +57,10 @@ export function validateConsoleConfig(config, root) {
       [/search/, '请检查联网搜索开关、聊天 ID 和单轮次数范围。每轮搜索次数为 1–3，摘要长度为 256–3000 字符。'],
       [/proactive/, '请检查主动聊天开关、内容方向、时间段和间隔。时间为 HH:MM，主动间隔为 30–1440 分钟。'],
       [/context/, '请检查上下文压缩设置：阈值为 4,000–2,000,000 token，空闲等待为 15–3,600 秒；单个聊天填 0 可关闭。'],
-      [/Hook/, '请检查发送请求超时、回执等待时间和并发上限。'],
-    ];
+          ];
     throw fault(translations.find(([pattern]) => pattern.test(error.message))?.[1] ?? '配置格式无效，请检查连接与回复设置。');
   }
-  for (const value of [config.runtime.python, config.runtime.dshDesktop ?? '']) {
+  for (const value of [config.runtime.python, config.runtime.dshDesktop ?? '', config.runtime.wechatExecutable ?? '']) {
     if (typeof value !== 'string' || /[\0\r\n"]/.test(value) || value.length > 1024) throw fault('程序路径包含无效字符。');
   }
   for (const list of [config.account.nicknames, config.wechat.wake_words]) {
@@ -195,6 +194,8 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
         remote(`http://127.0.0.1:${config.ports.adapter}/status`),
         token ? remote(`http://127.0.0.1:${config.ports.dshPlugin}/health`, token) : Promise.reject(),
         portOpen(config.ports.onebot),
+        // 就绪状态必须取得独立的登录账号证明，不信任遗留 Hook 状态字段。
+        accountVerifier({root,config,settings:optionalJson(readerFile),wait:false,requireReady:true}),
       ]);
       const value = index => results[index].status === 'fulfilled' ? results[index].value : null;
       const readerState = value(0), adapter = value(2), health = value(3);
@@ -203,14 +204,14 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       const dshReady = health?.ok === true && health.project === 'WeChatAgent' && sameProjectPath(health.projectRoot,root) && health.contextMode === 'native-session-v1' && health.behaviorPolicy === 'local-config-only-v1' && health.imageInput === 'native-attachment-v1' && (!optionalJson(preferenceFile).dshRestartRequired || matchesDsh);
       const readerReady = !!readerState && !!value(1) && !readerState.lastError;
       const bridgeReady = !!value(4) && adapter?.ob_connected === true;
-      const hookReady = adapter?.hook_connected === true && adapter?.hook_account_verified === true && adapter?.version === config.hook.expectedVersion;
-      const ready = readerReady && bridgeReady && hookReady && dshReady && adapter?.reader_connected === true;
+      const accountReady = value(5)?.ready === true;
+      const ready = readerReady && bridgeReady && accountReady && dshReady && adapter?.reader_connected === true;
       const { rows } = buffered();
       const previews=readReplyPreviews(root).map(row=>({...row,name:rows.findLast(m=>m.key===row.key)?.conversation_name??row.key}));
       const replyMode=replyDeliveryMode(config);
       const services = [
         { id: 'reader', label: '微信读取', ready: readerReady, detail: readerReady ? '数据库可读，消息同步正常' : readerState?.lastError ? '读取异常，请重新连接并验证' : readerFailureDetail(), port: config.ports.weflow },
-        { id: 'bridge', label: '消息桥接', ready: bridgeReady && hookReady && adapter?.reader_connected === true, detail: bridgeReady && hookReady && adapter?.reader_connected ? replyMode==='preview'?'登录与账号已核验，仅生成不发送':'收发连接正常，账号已核验' : !hookReady ? '等待匹配微信登录与发送连接' : '等待消息桥接连接', port: config.ports.adapter },
+        { id: 'bridge', label: '消息桥接', ready: bridgeReady && accountReady && adapter?.reader_connected === true, detail: bridgeReady && accountReady && adapter?.reader_connected ? '登录与账号已核验，仅生成不发送' : !accountReady ? readerSetupMessage(results[5].reason?.code ?? results[5].reason?.message ?? 'WECHAT_ACCOUNT_PROBE_FAILED') : '等待消息桥接连接', port: config.ports.adapter },
         { id: 'dsh', label: '模型连接', ready: dshReady, detail: dshReady ? 'DSH 插件已连接' : '打开 DSH 并启用本项目插件', port: config.ports.dshPlugin },
       ];
       const running = !!readerState || !!adapter || !!value(4);
@@ -227,11 +228,8 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     if (['start', 'stop', 'restart', 'prepare'].includes(action)) return ps('manage.ps1', action);
     if (action === 'setup') return ps(fs.existsSync(path.join(root, 'config', 'distribution.json')) ? 'check-runtime.ps1' : 'setup.ps1');
     if (action === 'dsh-open') return ps('launch-dsh.ps1');
-    if (action === 'wechat-open') return ps('launch-hook-wechat.ps1', ...(fs.existsSync(path.join(root,'state/hook/native/build.previous.json')) ? ['-UpdateHook'] : []));
-    if (action === 'hook-build') return ps('build-hook.ps1');
-    if (action === 'hook-pin') return ps('pin-hook-client.ps1');
-    if (action === 'hook-unpin') return ps('pin-hook-client.ps1', '-Unlock');
-    if (action === 'hook-check') return node('hook-onebot.mjs', '--check');
+    if (action === 'wechat-open') return ps('launch-wechat.ps1');
+    if (typeof action === 'string' && action.startsWith('hook-')) throw fault('HOOK_DISABLED');
     if (action === 'reader-check') return { exe: snapshot().config.runtime.python, args: ['-B', path.join(root, 'scripts', 'reader-api.py'), '--check'] };
     if (['sessions-configure', 'sessions-compact'].includes(action)) {
       const key = body.conversationKey;
@@ -255,7 +253,6 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     for (const key of ['dbPath', 'myWxid', 'decryptKey']) {
       if (typeof body[key] !== 'string' || body[key].length > 4096 || /[\0\r\n]/.test(body[key])) throw fault('读取设置包含无效字符。');
     }
-    if (typeof body.autoKey !== 'boolean') throw fault('请选择自动连接或手动验证。');
     const dbPath = body.dbPath.trim(), myWxid = body.myWxid.trim();
     if(!dbPath||!myWxid)throw fault('请先识别账号目录，并明确选择当前登录的微信账号。');
     const selectedId = readerAccountId(root, { dbPath, myWxid });
@@ -263,7 +260,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     const cached = selectedId ? cachedReaderAccount(root, selectedId) : null;
     const request = { operation: 'connect', dbPath, myWxid,
       decryptKey: body.decryptKey.trim() || (selectedId === currentId ? settings.decryptKey : cached?.reader?.decryptKey) || '',
-      autoKey: body.autoKey, wechatExecutable: snapshot().config.hook.wechatExecutable };
+      autoKey: false, wechatExecutable: snapshot().config.runtime.wechatExecutable ?? '' };
     if (!request.dbPath || !request.myWxid) throw fault('请先自动查找账号或选择微信账号文件夹。');
     return request;
   }
@@ -273,7 +270,7 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
     const checkRevision = readerRevision();
     const initialConfigRevision = snapshot().revision;
     const spec = connectRequest ? {} : command(body.action, body);
-    spec.timeoutMs = ['setup', 'hook-build', 'hook-test'].includes(body.action) ? 1200000 : ['start', 'restart'].includes(body.action) ? 180000 : 150000;
+    spec.timeoutMs = body.action === 'setup' ? 1200000 : ['start', 'restart'].includes(body.action) ? 180000 : 150000;
     const id = crypto.randomUUID();
     const job = { id, action: body.action, state: 'running', startedAt: Date.now(), output: '', exitCode: null };
     jobs.set(id, job); activeJob = id; latestJob = id;
@@ -411,14 +408,14 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if (req.method === 'GET' && route === '/api/status') return reply(200, await getStatus());
       if(req.method==='GET' && route==='/api/process-recovery'){
         assertIdle();const config=snapshot();
-        if(url.searchParams.get('purpose')==='hook-repair')return reply(200,{...await processRecovery.scan(config.config,config.revision,{includeMatchingWeChat:true,matchingWeChatOnly:true}),purpose:'hook-repair'});
+        if(url.searchParams.get('purpose')==='hook-repair')throw fault('HOOK_DISABLED');
         const status=await getStatus();
         const healthyPorts=[];
         if(status.services.find(service=>service.id==='reader')?.ready)healthyPorts.push(config.config.ports.weflow);
-        if(status.services.find(service=>service.id==='bridge')?.ready)healthyPorts.push(config.config.ports.onebot,config.config.ports.adapter,Number(new URL(config.config.hook.baseUrl).port||80));
+        if(status.services.find(service=>service.id==='bridge')?.ready)healthyPorts.push(config.config.ports.onebot,config.config.ports.adapter);
         if(status.services.find(service=>service.id==='dsh')?.ready)healthyPorts.push(config.config.ports.dshPlugin);
         const conflictPorts=startupConflictPorts(jobs.get(latestJob)?.output,Object.values(config.config.ports));
-        return reply(200,await processRecovery.scan(config.config,config.revision,{healthyPorts:healthyPorts.filter(port=>!conflictPorts.includes(port)),includeMatchingWeChat:/HOOK_COMPONENT_UPDATE_PENDING|HOOK_CLIENT_UNHEALTHY|HOOK_INITIALIZATION_TIMEOUT|HOOK_NOT_LISTENING/.test(jobs.get(latestJob)?.output??'')}));
+        return reply(200,await processRecovery.scan(config.config,config.revision,{healthyPorts:healthyPorts.filter(port=>!conflictPorts.includes(port))}));
       }
 
       if (req.method === 'GET' && route === '/api/persona-categories') return reply(200,personaCategories.read());
@@ -531,13 +528,13 @@ export function createConsole({ root = projectRoot, port = 3210, runner, readerS
       if(route==='/api/reply-mode'){
         assertIdle();
         try{const saved=saveReplyMode(root,body.mode,body.revision);statusTime=0;return reply(200,saved);}
-        catch(error){if(error.code==='REPLY_MODE_INVALID')throw fault('请选择仅生成或正常发送模式。');if(error.code==='REPLY_MODE_CONFLICT')throw fault('配置已变化，请刷新后重试。',409);throw error;}
+        catch(error){if(error.code==='HOOK_DISABLED')throw fault('HOOK_DISABLED');if(error.code==='REPLY_MODE_INVALID')throw fault('仅支持生成，不发送。');if(error.code==='REPLY_DELIVERY_DISABLED')throw fault('REPLY_DELIVERY_DISABLED');if(error.code==='REPLY_MODE_CONFLICT')throw fault('配置已变化，请刷新后重试。',409);throw error;}
       }
       if (route === '/api/config') {
         const previous = snapshot();
         if (body.revision !== previous.revision) throw fault('配置已在其他窗口更新，请重新载入后再保存。', 409);
         const config = validateConsoleConfig(body.config, root);
-        if (Object.values(config.ports).includes(boundPort) || Number(new URL(config.hook.baseUrl).port || 80) === boundPort) throw fault('服务端口不能与当前控制台端口重复。');
+        if (Object.values(config.ports).includes(boundPort)) throw fault('服务端口不能与当前控制台端口重复。');
         backup(configFile); atomic(configFile, config);
         const withoutStickers=value=>{const copy=structuredClone(value);delete copy.wechat.stickers;delete copy.wechat.search;delete copy.wechat.webReader;delete copy.wechat.proactive;delete copy.wechat.context;delete copy.wechat.chatModes;delete copy.wechat.dshAccess;delete copy.wechat.memeLibrary;delete copy.wechat.assistant;return copy;};
         if(JSON.stringify(withoutStickers(previous.config))!==JSON.stringify(withoutStickers(config)))markPending(JSON.stringify(previous.config.dsh) !== JSON.stringify(config.dsh) || previous.config.ports.dshPlugin !== config.ports.dshPlugin);

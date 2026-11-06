@@ -49,27 +49,7 @@ async function bootstrapDeployment(resourcesPath, dataHome, progress = () => {},
   // Keep an existing legacy executable/data binding; new installations choose
   // an independently installed DSH through the setup page.
   const dsh = dshBundled ? path.join(versionRuntime,'dsh','DeepSeek Harness.exe') : previousSettings.dsh || '';
-  const client = path.join(workspace, 'state', 'hook', 'wechat-4.1.10.27');
-  if (!fs.existsSync(path.join(client, 'Weixin.exe'))) {
-    progress('正在准备独立匹配微信…');
-    fs.mkdirSync(path.dirname(client), { recursive: true }); await fs.promises.cp(path.join(resourcesPath, 'vendor', 'wechat'), client, { recursive: true });
-  }
-  const nativeDir = path.join(workspace, 'state', 'hook', 'native');
-  fs.mkdirSync(nativeDir, { recursive: true });
-  const previousBuild = path.join(nativeDir,'build.json');
-  if (fs.existsSync(previousBuild) && fs.existsSync(path.join(nativeDir,'version.dll'))) {
-    const installedHash=crypto.createHash('sha256').update(fs.readFileSync(path.join(nativeDir,'version.dll'))).digest('hex');
-    const nextHash=crypto.createHash('sha256').update(fs.readFileSync(path.join(resourcesPath,'vendor/hook/version.dll'))).digest('hex');
-    if (installedHash !== nextHash) {
-      const previous=JSON.parse(fs.readFileSync(previousBuild,'utf8').replace(/^\uFEFF/,''));
-      if (previous.sha256 === installedHash) fs.copyFileSync(previousBuild,path.join(nativeDir,'build.previous.json'));
-    }
-  }
-  for (const file of ['version.dll', 'build.json']) {
-    const source = path.join(resourcesPath, 'vendor', 'hook', file), target = path.join(nativeDir, file);
-    const bytes = fs.readFileSync(source);
-    if (!fs.existsSync(target) || crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex') !== crypto.createHash('sha256').update(bytes).digest('hex')) fs.writeFileSync(target,bytes);
-  }
+  // 禁用 Hook 后只准备模型与读取运行时；保留旧客户端、DLL 和回滚文件，不再复制或部署。
   const configFile = path.join(workspace, 'config', 'wechatagent.json');
   if (!fs.existsSync(configFile)) {
     const config = JSON.parse(fs.readFileSync(path.join(workspace, 'config', 'wechatagent.example.json'), 'utf8'));
